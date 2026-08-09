@@ -460,8 +460,8 @@ struct WindowEx {
         return TJS_S_OK;
     }
 
-    // property maximized
-    static bool isMaximized(iTJSDispatch2 *obj) { return true; }
+    // libkrkr2.so sub_611444 @ 0x611444 writes tvtInteger(0) for this getter.
+    static bool isMaximized(iTJSDispatch2 *obj) { return false; }
 
     static tjs_error getMaximized(tTJSVariant *r, tjs_int n, tTJSVariant **p,
                                   iTJSDispatch2 *obj) {
@@ -962,9 +962,11 @@ NCB_ATTACH_CLASS_WITH_HOOK(WindowEx, Window) {
     // RawCallback(TJS_W("maximizeBox"), &Class::getMaximizeBox,
     // &Class::setMaximizeBox, 0); RawCallback(TJS_W("minimizeBox"),
     // &Class::getMinimizeBox,      &Class::setMinimizeBox, 0);
-    // RawCallback(TJS_W("maximized"),           &Class::getMaximized,
-    // &Class::setMaximized, 0); RawCallback(TJS_W("minimized"),
-    // &Class::getMinimized,      &Class::setMinimized, 0);
+    // libkrkr2.so sub_6104E8 @ 0x610844/0x610888 registers both properties.
+    RawCallback(TJS_W("maximized"), &Class::getMaximized,
+                &Class::setMaximized, 0);
+    RawCallback(TJS_W("minimized"), &Class::getMinimized,
+                &Class::setMinimized, 0);
     RawCallback(TJS_W("showRestore"), &Class::showRestore, 0);
     RawCallback(TJS_W("resetWindowIcon"), &Class::resetWindowIcon, 0);
     RawCallback(TJS_W("setWindowIcon"), &Class::setWindowIcon, 0);

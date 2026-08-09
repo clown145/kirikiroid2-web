@@ -1,0 +1,4 @@
+interface:
+  display_name: "KrKr2 本机游戏测试"
+  short_description: "本机启动 KrKr2 游戏并采集运行日志与诊断证据"
+  default_prompt: "使用 $krkr2-local-game-test 启动目标游戏、采集日志并诊断启动问题。"
