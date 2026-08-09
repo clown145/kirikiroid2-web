@@ -26,7 +26,8 @@
          这几支脚本与产品前端解耦（见 js/engine/engine.js 的设计说明），
          Vue 侧只通过 window.KrKr2Engine 消费。 -->
     <script src="/js/vendor/jszip.min.js"></script>
-    <script src="/vlfs.js?v=opfs-zip-cache-v2"></script>
+    <script src="/js/storage/game-cache.js"></script>
+    <script src="/vlfs.js?v=game-block-cache-v1"></script>
 
     <!-- 构建注入的配置；源码树直接开页面时 build-config.js 404，
          classic script 的 404 只报错不中断解析，随后的 config.js 填开发默认值。 -->

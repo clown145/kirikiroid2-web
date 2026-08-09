@@ -116,6 +116,11 @@ function pickXp3(path) {
 /** 由 LocalPicker 触发：本地文件/目录已选好，直接注册进引擎。 */
 async function startLocalSource(src) {
     // 本地模式没有库条目，用固定空间，避免每个文件一个库
+    try {
+        await window.KrKr2Engine.setGameCacheId(null);
+    } catch (err) {
+        console.warn('[player] 无法关闭远程资源缓存上下文:', err);
+    }
     await window.KrKr2Engine.setSaveSpace('local', { remember: true, register: true });
     try {
         await loadSource(src, chooseEntry);
@@ -159,6 +164,13 @@ onMounted(async () => {
     // 按 URL 建空间会让每次改路径都换一个新库。
     if (urlSource) {
         try {
+            // 调试 URL 没有 D1 id，但 URL 本身在多次启动间稳定；与固定的
+            // save space 分开，避免多个 URL 共用同一份远程资源缓存。
+            await window.KrKr2Engine.setGameCacheId('url:' + urlSource.url);
+        } catch (err) {
+            console.warn('[player] 资源缓存绑定失败，本次只使用内存缓存:', err);
+        }
+        try {
             await window.KrKr2Engine.setSaveSpace('url', { remember: true, register: true });
         } catch (err) {
             console.warn('[player] 存档空间绑定失败，本次游戏不保存进度:', err);
@@ -183,6 +195,12 @@ onMounted(async () => {
     if (!game.value.downloadUrl) {
         fatal.value = '该条目尚未配置资源地址，请到管理后台补上 downloadUrl。';
         return;
+    }
+
+    try {
+        await window.KrKr2Engine.setGameCacheId(game.value.id);
+    } catch (err) {
+        console.warn('[player] 资源缓存绑定失败，本次只使用内存缓存:', err);
     }
 
     // 存档空间绑 game.id（并迁移旧的 save_<title>），标题改动不再丢档

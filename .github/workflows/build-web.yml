@@ -76,18 +76,14 @@ jobs:
           echo "${{ env.EMSDK }}/upstream/emscripten" >> $GITHUB_PATH
           echo "$(dirname $(find ${{ env.EMSDK }}/node -name node -type f | head -1))" >> $GITHUB_PATH
 
-      - name: Cache vcpkg
-        uses: actions/cache@v4
-        id: vcpkg-cache
-        with:
-          path: ${{ env.VCPKG_ROOT }}
-          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg/**') }}
-
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
           vcpkgDirectory: ${{ env.VCPKG_ROOT }}
           vcpkgGitCommitId: b1e15efef6758eaa0beb0a8732cfa66f6a68a81d
+          # 由 run-vcpkg 用固定提交和 manifest 生成工具缓存键，避免外层
+          # actions/cache 与它同时管理 .vcpkg、且遗漏 pinned commit。
+          doNotCache: false
 
       - name: Check NuGet API key
         run: |

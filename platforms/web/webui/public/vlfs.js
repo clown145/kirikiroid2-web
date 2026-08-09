@@ -8,7 +8,7 @@
  * 内存驻留硬约束：不在内存持有任何全量文件数据。
  *  - 能 Blob 则 Blob（下载包/拖拽 File/ZIP stored 条目切片，off-heap）；
  *  - 不能 Blob 则 OPFS（ZIP deflate 条目在注册阶段立即全部流式解压落盘，
- *    不懒解压；完整 ZIP 以中央目录 SHA-256 指纹跨页面复用）；
+ *    不懒解压；远程游戏 ZIP 以 validator/中央目录指纹按游戏跨页面复用）；
  *  - 内存仅限有界块级 LRU 读缓存 + 写 overlay（存档级小文件）。
  *
  * 线程模型：所有方法只在浏览器主线程调用。wasm 主线程经 JSPI（EM_ASYNC_JS）
@@ -74,8 +74,11 @@
         _opfsRoot: null,
         _opfsDir: null,
         _opfsSessionName: null,
+        _gameCacheId: null,
         _statsHit: 0,
         _statsMiss: 0,
+        _statsPersistentHit: 0,
+        _statsPersistentMiss: 0,
         // 写关闭钩子：shell.html 赋值，做 IDB write-through + MEMFS 小文件镜像
         onWriteClose: null,
 
@@ -88,11 +91,12 @@
             this._fds.clear();
             this._blockCache.clear();
             this._blockCacheBytes = 0;
+            this._gameCacheId = null;
             this._ensureDirNode('/');
             // 普通临时 spill 不能复用上一 Document 的文件路径：浏览器可能
             // 已经释放 Web Lock，却仍在异步关闭旧 writable stream。为此先
-            // 创建当前会话的唯一目录，再回收旧会话；有完成标记的 ZIP 解压
-            // 缓存目录则保留，由 _prepareZipCache 校验后跨页面复用。
+            // 创建当前会话的唯一目录，再回收旧会话。跨页面资源缓存已迁到
+            // krkr2-game-cache；vlfs-tmp 中的旧版全局 ZIP 缓存也在此回收。
             try {
                 var root = await navigator.storage.getDirectory();
                 var opfsRoot = await root.getDirectoryHandle(
@@ -106,10 +110,6 @@
                 for await (var pair of opfsRoot.entries()) {
                     var name = pair[0];
                     if (name === sessionName) continue;
-                    // ZIP 解压缓存跨 Document 持久化；只有会话目录和旧版
-                    // 直接写在根目录的临时文件由 init() 回收。
-                    if (name === ZIP_CACHE_STATE_FILE ||
-                        name.indexOf(ZIP_CACHE_DIR_PREFIX) === 0) continue;
                     try {
                         await opfsRoot.removeEntry(name, { recursive: true });
                     } catch (e) {
@@ -148,6 +148,20 @@
             }
         },
 
+        setGameCacheId(gameId) {
+            this._gameCacheId = gameId ? String(gameId) : null;
+        },
+
+        _attachPersistentCache(source, descriptor) {
+            if (!this._gameCacheId || !descriptor ||
+                !descriptor.fingerprint || !window.KrKr2GameCache) return;
+            source.cachePromise = window.KrKr2GameCache.openSource(
+                this._gameCacheId, descriptor).catch(function (e) {
+                    console.warn('[vlfs] persistent source cache unavailable:', e);
+                    return null;
+                });
+        },
+
         _zipCacheEntriesEqual(a, b) {
             if (!Array.isArray(a) || a.length !== b.length) return false;
             for (var i = 0; i < b.length; i++) {
@@ -165,10 +179,11 @@
          * 新 ZIP 解压失败时不会覆盖旧 state；下次仍可复用上一个完整缓存。
          */
         async _prepareZipCache(fingerprint, expectedEntries,
-                               fallbackFingerprint) {
-            if (!this._opfsRoot || !expectedEntries.length) return null;
+                               fallbackFingerprint, persistentRoot) {
+            var cacheRoot = persistentRoot || this._opfsDir;
+            if (!cacheRoot || !expectedEntries.length) return null;
             var state = await this._readOpfsJson(
-                this._opfsRoot, ZIP_CACHE_STATE_FILE);
+                cacheRoot, ZIP_CACHE_STATE_FILE);
             if (state && state.version === ZIP_CACHE_SCHEMA_VERSION &&
                 (state.fingerprint === fingerprint ||
                  (fallbackFingerprint &&
@@ -176,7 +191,7 @@
                 typeof state.dirName === 'string' &&
                 this._zipCacheEntriesEqual(state.entries, expectedEntries)) {
                 try {
-                    var hitDir = await this._opfsRoot.getDirectoryHandle(
+                    var hitDir = await cacheRoot.getDirectoryHandle(
                         state.dirName);
                     var hitFiles = new Map();
                     for (var i = 0; i < expectedEntries.length; i++) {
@@ -194,68 +209,88 @@
                         // 完成标记，避免为迁移再次解压数 GB ZIP。
                         state.fingerprint = fingerprint;
                         await this._writeOpfsJson(
-                            this._opfsRoot, ZIP_CACHE_STATE_FILE, state);
+                            cacheRoot, ZIP_CACHE_STATE_FILE, state);
                     }
                     console.log('[vlfs] ZIP OPFS cache hit: ' + fingerprint);
                     return {
                         complete: true, dir: hitDir, dirName: state.dirName,
                         fingerprint: fingerprint, entries: expectedEntries,
-                        files: hitFiles
+                        files: hitFiles, root: cacheRoot
                     };
                 } catch (e) {
                     console.warn('[vlfs] ZIP OPFS cache invalid:', e);
                     try {
-                        await this._opfsRoot.removeEntry(ZIP_CACHE_STATE_FILE);
+                        await cacheRoot.removeEntry(ZIP_CACHE_STATE_FILE);
                     } catch (ignored) {}
                 }
             }
 
             var dirName = ZIP_CACHE_DIR_PREFIX + fingerprint;
             try {
-                await this._opfsRoot.removeEntry(dirName, { recursive: true });
+                await cacheRoot.removeEntry(dirName, { recursive: true });
             } catch (ignored) {}
             var cacheDir;
             try {
-                cacheDir = await this._opfsRoot.getDirectoryHandle(
+                cacheDir = await cacheRoot.getDirectoryHandle(
                     dirName, { create: true });
             } catch (e) {
                 // 上一 Document 的失败写流仍占用同名目录时，用唯一后缀绕开；
                 // 完成 state 会记录实际目录名，之后仍可稳定命中。
                 dirName += '-' + makeOpfsSessionName().substring(8);
-                cacheDir = await this._opfsRoot.getDirectoryHandle(
+                cacheDir = await cacheRoot.getDirectoryHandle(
                     dirName, { create: true });
             }
             console.log('[vlfs] ZIP OPFS cache miss: ' + fingerprint);
             return {
                 complete: false, dir: cacheDir, dirName: dirName,
                 fingerprint: fingerprint, entries: expectedEntries,
-                files: new Map()
+                files: new Map(), root: cacheRoot
             };
         },
 
         async _commitZipCache(cache) {
-            if (!cache || cache.complete || !this._opfsRoot) return;
+            if (!cache || cache.complete || !cache.root) return;
             // FileSystemWritableFileStream.close() 提交完成后才写 state；因此
             // 崩溃、取消或任一条目解压失败都不会产生可命中的完成标记。
-            await this._writeOpfsJson(this._opfsRoot, ZIP_CACHE_STATE_FILE, {
-                version: ZIP_CACHE_SCHEMA_VERSION,
-                fingerprint: cache.fingerprint,
-                dirName: cache.dirName,
-                entries: cache.entries
-            });
+            try {
+                await this._writeOpfsJson(cache.root, ZIP_CACHE_STATE_FILE, {
+                    version: ZIP_CACHE_SCHEMA_VERSION,
+                    fingerprint: cache.fingerprint,
+                    dirName: cache.dirName,
+                    entries: cache.entries
+                });
+            } catch (e) {
+                console.warn('[vlfs] ZIP cache commit failed; using session data:', e);
+                return;
+            }
             cache.complete = true;
+            if (cache.gameCacheSource && window.KrKr2GameCache) {
+                var expandedBytes = cache.entries.reduce(function (sum, entry) {
+                    return sum + entry.size;
+                }, 0);
+                try {
+                    await window.KrKr2GameCache.setExpandedBytes(
+                        cache.gameCacheSource, expandedBytes);
+                } catch (e) {
+                    console.warn('[vlfs] ZIP cache accounting failed:', e);
+                }
+            }
             console.log('[vlfs] ZIP OPFS cache committed: ' + cache.fingerprint);
 
             // 只保留最后一次完整 ZIP 的目录；仍被旧 Document 占用的目录
             // 删除失败时暂留，后续成功提交时继续回收。
-            for await (var pair of this._opfsRoot.entries()) {
-                var name = pair[0];
-                if (name === ZIP_CACHE_STATE_FILE ||
-                    name.indexOf(ZIP_CACHE_DIR_PREFIX) !== 0 ||
-                    name === cache.dirName) continue;
-                try {
-                    await this._opfsRoot.removeEntry(name, { recursive: true });
-                } catch (ignored) {}
+            try {
+                for await (var pair of cache.root.entries()) {
+                    var name = pair[0];
+                    if (name === ZIP_CACHE_STATE_FILE ||
+                        name.indexOf(ZIP_CACHE_DIR_PREFIX) !== 0 ||
+                        name === cache.dirName) continue;
+                    try {
+                        await cache.root.removeEntry(name, { recursive: true });
+                    } catch (ignored) {}
+                }
+            } catch (e) {
+                console.warn('[vlfs] old ZIP cache cleanup failed:', e);
             }
         },
 
@@ -308,11 +343,23 @@
             return e;
         },
 
-        registerRemote(path, url, size, supportsRanges) {
-            return this._register(path, {
+        registerRemote(path, url, size, supportsRanges, opts) {
+            opts = opts || {};
+            var entry = this._register(path, {
                 kind: supportsRanges ? 'remote' : 'blob',
                 size: size, url: url, blob: null
             });
+            if (supportsRanges) {
+                this._attachPersistentCache(entry, {
+                    kind: opts.kind || 'remote',
+                    slot: opts.slot || path,
+                    path: path,
+                    url: url,
+                    size: size,
+                    fingerprint: opts.fingerprint || ''
+                });
+            }
+            return entry;
         },
 
         registerOverlayFile(path, data) {
@@ -335,17 +382,37 @@
         },
 
         async registerZipRemote(url, size, opts) {
-            return this._registerZipSource(
-                {
-                    kind: 'remote', size: size, url: url,
-                    fingerprint: opts && opts.fingerprint
-                }, opts);
+            opts = opts || {};
+            var source = {
+                kind: 'remote', size: size, url: url,
+                fingerprint: opts.fingerprint
+            };
+            this._attachPersistentCache(source, {
+                kind: 'zip',
+                slot: opts.slot || url,
+                url: url,
+                size: size,
+                fingerprint: opts.fingerprint || ''
+            });
+            return this._registerZipSource(source, opts);
         },
 
         async _registerZipSource(source, opts) {
             opts = opts || {};
             var mountPrefix = opts.mountPrefix || '/';
             var parsed = await this._parseZipCentralDirectory(source);
+            // 没有可见 HTTP validator 时，中央目录必须每次从网络读取以判断
+            // 内容是否变化；拿到其内容指纹后，后续数据块和解压结果仍可安全
+            // 按该指纹持久化。
+            if (source.kind === 'remote' && !source.cachePromise) {
+                this._attachPersistentCache(source, {
+                    kind: 'zip',
+                    slot: opts.slot || source.url,
+                    url: source.url,
+                    size: source.size,
+                    fingerprint: parsed.fingerprint
+                });
+            }
             var records = parsed.records;
             // 与旧 findCommonZipPrefix 语义一致：剥离唯一公共顶层目录
             var stripPrefix = opts.stripPrefix;
@@ -385,10 +452,35 @@
                     crc32: item.record.crc32
                 };
             });
-            var zipCache = await this._prepareZipCache(
-                parsed.fingerprint, expectedCacheEntries,
-                parsed.fallbackFingerprint);
+            var gameCacheSource = source.cachePromise ?
+                await source.cachePromise : null;
+            var zipCache;
+            try {
+                zipCache = await this._prepareZipCache(
+                    parsed.fingerprint, expectedCacheEntries,
+                    parsed.fallbackFingerprint,
+                    gameCacheSource ? gameCacheSource.expandedDir : null);
+            } catch (e) {
+                if (!gameCacheSource) throw e;
+                console.warn('[vlfs] persistent ZIP cache failed; using session:', e);
+                gameCacheSource = null;
+                zipCache = await this._prepareZipCache(
+                    parsed.fingerprint, expectedCacheEntries,
+                    parsed.fallbackFingerprint, null);
+            }
             if (zipCache) {
+                zipCache.gameCacheSource = gameCacheSource;
+                if (zipCache.complete && gameCacheSource &&
+                    window.KrKr2GameCache) {
+                    var cachedExpandedBytes = expectedCacheEntries.reduce(
+                        function (sum, entry) { return sum + entry.size; }, 0);
+                    try {
+                        await window.KrKr2GameCache.setExpandedBytes(
+                            gameCacheSource, cachedExpandedBytes);
+                    } catch (e) {
+                        console.warn('[vlfs] ZIP cache accounting failed:', e);
+                    }
+                }
                 for (var k = 0; k < deflated.length; k++) {
                     var cacheName = expectedCacheEntries[k].file;
                     deflated[k].entry.opfsCacheDir = zipCache.dir;
@@ -647,6 +739,92 @@
             }
         },
 
+        async _fetchRemoteRange(source, pos, len) {
+            var resp = await fetch(source.url, {
+                headers: { 'Range': 'bytes=' + pos + '-' + (pos + len - 1) }
+            });
+            if (resp.status !== 206 && resp.status !== 200)
+                throw new Error('range fetch ' + source.url + ': ' + resp.status);
+            var rbuf = await resp.arrayBuffer();
+            var data;
+            if (resp.status === 200 && rbuf.byteLength > len) {
+                if (pos + len > rbuf.byteLength)
+                    throw new Error('short full response for ' + source.url);
+                data = new Uint8Array(rbuf, pos, len).slice();
+            } else {
+                data = new Uint8Array(
+                    rbuf, 0, Math.min(len, rbuf.byteLength)).slice();
+            }
+            if (data.length !== len)
+                throw new Error('short range ' + data.length + ' < ' + len);
+            return data;
+        },
+
+        async _loadPersistentRemoteBlock(source, blockIdx) {
+            var off = blockIdx * BLOCK_SIZE;
+            var expected = Math.min(BLOCK_SIZE, source.size - off);
+            if (expected <= 0) return new Uint8Array(0);
+
+            if (!source._persistentBlockLoads)
+                source._persistentBlockLoads = new Map();
+            if (source._persistentBlockLoads.has(blockIdx))
+                return await source._persistentBlockLoads.get(blockIdx);
+
+            var self = this;
+            var load = (async function () {
+                var cache = null;
+                try { cache = await source.cachePromise; } catch (ignored) {}
+                if (!cache)
+                    return await self._fetchRemoteRange(source, off, expected);
+
+                var cached = await window.KrKr2GameCache.readBlock(
+                    cache, blockIdx, expected);
+                if (cached) {
+                    self._statsPersistentHit++;
+                    return cached;
+                }
+
+                self._statsPersistentMiss++;
+                var data = await self._fetchRemoteRange(source, off, expected);
+                try {
+                    // close() 完成后该 block 才会被后续启动视为有效；异常或
+                    // 半写文件由 readBlock 的尺寸校验自动丢弃。
+                    await window.KrKr2GameCache.writeBlock(
+                        cache, blockIdx, data);
+                } catch (e) {
+                    console.warn('[vlfs] persistent block write failed:', e);
+                }
+                return data;
+            })();
+            source._persistentBlockLoads.set(blockIdx, load);
+            try {
+                return await load;
+            } finally {
+                source._persistentBlockLoads.delete(blockIdx);
+            }
+        },
+
+        async _readRemoteBytes(source, pos, len) {
+            if (!source.cachePromise)
+                return await this._fetchRemoteRange(source, pos, len);
+
+            var out = new Uint8Array(len);
+            var done = 0;
+            while (done < len) {
+                var absolute = pos + done;
+                var blockIdx = Math.floor(absolute / BLOCK_SIZE);
+                var block = await this._loadPersistentRemoteBlock(
+                    source, blockIdx);
+                var inBlock = absolute - blockIdx * BLOCK_SIZE;
+                var take = Math.min(len - done, block.length - inBlock);
+                if (take <= 0)
+                    throw new Error('empty cached range @' + absolute);
+                out.set(block.subarray(inBlock, inBlock + take), done);
+                done += take;
+            }
+            return out;
+        },
+
         async _readSource(e, pos, len) {
             switch (e.kind) {
                 case 'blob': {
@@ -669,16 +847,7 @@
                     return new Uint8Array(fbuf);
                 }
                 case 'remote': {
-                    var resp = await fetch(e.url, {
-                        headers: { 'Range': 'bytes=' + pos + '-' + (pos + len - 1) }
-                    });
-                    if (resp.status !== 206 && resp.status !== 200)
-                        throw new Error('range fetch ' + e.url + ': ' + resp.status);
-                    var rbuf = await resp.arrayBuffer();
-                    // 服务器忽略 Range 返回 200 全量时裁剪
-                    if (resp.status === 200 && rbuf.byteLength > len)
-                        return new Uint8Array(rbuf, pos, len).slice();
-                    return new Uint8Array(rbuf, 0, Math.min(len, rbuf.byteLength)).slice();
+                    return await this._readRemoteBytes(e, pos, len);
                 }
                 case 'zip': {
                     if (e.method === 0) {
@@ -750,22 +919,15 @@
                 var bbuf = await source.blob.slice(pos, pos + len).arrayBuffer();
                 return new Uint8Array(bbuf);
             }
-            var resp = await fetch(source.url, {
-                headers: { 'Range': 'bytes=' + pos + '-' + (pos + len - 1) }
-            });
-            if (resp.status !== 206 && resp.status !== 200)
-                throw new Error('zip range fetch ' + source.url + ': ' + resp.status);
-            var rbuf = await resp.arrayBuffer();
-            if (resp.status === 200 && rbuf.byteLength > len)
-                return new Uint8Array(rbuf, pos, len).slice();
-            if (rbuf.byteLength < len)
-                throw new Error('short zip range: ' + rbuf.byteLength + ' < ' + len);
-            return new Uint8Array(rbuf, 0, len).slice();
+            return await this._readRemoteBytes(source, pos, len);
         },
 
         async _readZipSourceStream(source, pos, len) {
             if (source.kind === 'blob')
                 return source.blob.slice(pos, pos + len).stream();
+            // deflate 输入在解压完成后已有逐游戏 OPFS 成品；再保存一份压缩
+            // Range 会让大 ZIP 占用接近双倍空间。这里保持网络流式读取，
+            // stored 条目和直接 XP3 的随机区间仍走持久 block 缓存。
             var resp = await fetch(source.url, {
                 headers: { 'Range': 'bytes=' + pos + '-' + (pos + len - 1) }
             });
@@ -873,7 +1035,9 @@
             return {
                 entries: this._entries.size,
                 blockCacheBytes: this._blockCacheBytes,
-                hit: this._statsHit, miss: this._statsMiss
+                hit: this._statsHit, miss: this._statsMiss,
+                persistentHit: this._statsPersistentHit,
+                persistentMiss: this._statsPersistentMiss
             };
         }
     };

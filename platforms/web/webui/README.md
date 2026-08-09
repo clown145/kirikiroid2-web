@@ -231,6 +231,16 @@ R2 里是扁平 key（`index.wasm`、`index.js`……），每次构建覆盖 �
 `js/loaders/remote.js` 的 HTTP Range 懒加载是核心优化，单个包可达数 GB，
 必须直连 R2。
 
+**游戏资源预载与持久缓存。**
+播放页会在 KAG 解析器取得标签后，对当前脚本位置后约 240 行、最多 4 个等待点
+做只读前瞻。它只接受字面 `storage=`，不执行表达式或宏；立绘/背景交给
+`TVPTouchImages`，语音按 256 KiB 小步经 `TVPCreateStream` 读取，所以 XP3 的
+分段、压缩和 filter 仍由引擎决定。远程 Range 读出的物理块会按 `game.id` 写入
+OPFS，ZIP 的 deflate 成品也在同一游戏目录下复用。服务器提供 `X-Content-SHA256`、
+`ETag` 或 `Last-Modified` 时，版本变化会自动使旧来源失效；没有 validator 则只
+使用会话缓存以避免误用旧资源。画廊每张卡片显示容量并可单独清理，存档仍在独立
+的 IndexedDB space 中。
+
 ---
 
 ## 测试

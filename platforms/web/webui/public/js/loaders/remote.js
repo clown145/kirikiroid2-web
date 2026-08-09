@@ -37,6 +37,18 @@
 
     // 探测远程服务器对 Range 请求的支持。优先 HEAD 查标头；若无标头则用
     // 1-byte Range (0-0) 探测，防止因跨域 CORS 未 Exposed 标头而误降级为全量下载。
+    function responseFingerprint(headers) {
+        var contentSha256 = (headers.get('X-Content-SHA256') || '')
+            .trim().toLowerCase();
+        if (/^[0-9a-f]{64}$/.test(contentSha256))
+            return 'sha256-' + contentSha256;
+        var etag = (headers.get('ETag') || '').trim();
+        if (etag) return 'etag-' + etag;
+        var modified = (headers.get('Last-Modified') || '').trim();
+        if (modified) return 'last-modified-' + modified;
+        return '';
+    }
+
     async function probeRemoteRange(url) {
         var ranges = false, size = -1, fingerprint = '';
         try {
@@ -44,8 +56,7 @@
             if (head.ok) {
                 ranges = (head.headers.get('Accept-Ranges') || '').toLowerCase() === 'bytes';
                 size = parseInt(head.headers.get('Content-Length') || '-1', 10);
-                var contentSha256 = (head.headers.get('X-Content-SHA256') || '').trim().toLowerCase();
-                if (/^[0-9a-f]{64}$/.test(contentSha256)) fingerprint = 'sha256-' + contentSha256;
+                fingerprint = responseFingerprint(head.headers);
             }
         } catch (e) {}
 
@@ -54,6 +65,8 @@
                 var test = await fetch(url, { headers: { 'Range': 'bytes=0-0' } });
                 if (test.status === 206) {
                     ranges = true;
+                    if (!fingerprint)
+                        fingerprint = responseFingerprint(test.headers);
                     var cr = test.headers.get('Content-Range'); // e.g. "bytes 0-0/123456"
                     if (cr) {
                         var match = cr.match(/\/(\d+)$/);
@@ -74,7 +87,11 @@
         var probe = await probeRemoteRange(src.url);
 
         if (probe.ranges && probe.size > 0) {
-            VLFS.registerRemote('/data.xp3', src.url, probe.size, true);
+            VLFS.registerRemote('/data.xp3', src.url, probe.size, true, {
+                kind: 'xp3',
+                slot: '/data.xp3',
+                fingerprint: probe.fingerprint
+            });
             console.log('[vlfs] remote xp3 (Range lazy-load): ' + src.url + ', ' + probe.size + ' bytes');
         } else {
             report(hooks, 0, 'Downloading game data...');
@@ -108,6 +125,7 @@
             report(hooks, 0, 'Reading archive index...');
             reg = await VLFS.registerZipRemote(src.url, probe.size, {
                 fingerprint: probe.fingerprint || undefined,
+                slot: '/game.zip',
                 onProgress: function (done, total, path) {
                     report(hooks, Math.round(done / total * 100),
                         'Extracting (' + done + '/' + total + ') ' + path.substring(1));
@@ -164,15 +182,25 @@
             // 规范化路径名，必须以 '/' 开头
             var path = item.name.startsWith('/') ? item.name : ('/' + item.name);
             
-            // 如果 JSON 中没提供 size，则探测获取
-            var size = item.size;
-            if (typeof size !== 'number' || size <= 0) {
-                var probe = await probeRemoteRange(item.url);
-                size = probe.size;
+            // 即使清单已有 size 也要探测 validator；没有内容版本标识时
+            // 不能安全跨启动复用旧分片。
+            var itemProbe = await probeRemoteRange(item.url);
+            var size = (typeof item.size === 'number' && item.size > 0)
+                ? item.size : itemProbe.size;
+            var fingerprint = '';
+            if (typeof item.sha256 === 'string' &&
+                /^[0-9a-f]{64}$/i.test(item.sha256.trim())) {
+                fingerprint = 'sha256-' + item.sha256.trim().toLowerCase();
+            } else {
+                fingerprint = itemProbe.fingerprint;
             }
             
             if (size > 0) {
-                VLFS.registerRemote(path, item.url, size, true);
+                VLFS.registerRemote(path, item.url, size, itemProbe.ranges, {
+                    kind: path.toLowerCase().endsWith('.xp3') ? 'xp3' : 'file',
+                    slot: path,
+                    fingerprint: fingerprint
+                });
                 if (path.toLowerCase().endsWith('.xp3')) {
                     xp3Paths.push(path);
                 }
@@ -190,4 +218,5 @@
     };
 
     L.fetchBlobWithProgress = fetchBlobWithProgress;
+    L.probeRemoteRange = probeRemoteRange;
 })();

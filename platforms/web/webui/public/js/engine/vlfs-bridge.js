@@ -3,7 +3,7 @@
 // 依赖 window.VLFS（platforms/web/vlfs.js）与 window.KrKr2Guards（单例锁）。
 
 (function () {
-    // --- VirtualLazyFS 初始化（创建独立 OPFS 会话、保留完整 ZIP 缓存）---
+    // --- VirtualLazyFS 初始化（创建独立 OPFS 会话；游戏缓存另行持久化）---
     // 必须在取得跨标签页单例锁后才接触 OPFS。冲突页让此 Promise 保持
     // pending，因此不会继续创建 OPFS 会话、注册 ZIP 或启动 wasm main。
     var vlfsReady = window.KrKr2Guards.singletonReady.then(function (acquired) {

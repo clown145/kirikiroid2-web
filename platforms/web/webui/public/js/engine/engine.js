@@ -9,6 +9,7 @@
 //                            Platform.cpp 的 krkr2_get_startup_xp3_path()
 //                            经 EM_JS 读取。
 //   Module._saveSpaceId      当前存档空间 id（纯 JS 侧状态，供写回链路判断）
+//   Module._gameCacheId      当前远程资源缓存 id（与存档空间相互独立）
 //   Module._hostDirHandle    File System Access 目录句柄（纯 JS 侧状态）
 //   Module._hostDirPrefix    上述句柄对应的引擎路径前缀（纯 JS 侧状态）
 // ────────────────────────────────────────────────────────────────────
@@ -238,6 +239,14 @@
             if (opts.remember !== false) localStorage.setItem('krkr2-last-space', id);
             return window.KrKr2IDB.open(id).then(function () {
                 if (opts.register !== false) window.KrKr2IDB.registerSpace(id);
+            });
+        },
+
+        /** 设置远程资源分片所属游戏；不会创建或修改存档空间。 */
+        setGameCacheId: function (id) {
+            if (window.Module) window.Module._gameCacheId = id || null;
+            return window.KrKr2VLFS.ready.then(function () {
+                VLFS.setGameCacheId(id);
             });
         },
 
