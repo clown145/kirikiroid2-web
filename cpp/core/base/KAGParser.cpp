@@ -33,6 +33,34 @@
 #include <spdlog/spdlog.h>
 #ifdef EMSCRIPTEN
 #include <emscripten.h>
+
+EM_JS(int, TVPWebPrefetchGetEnabled, (), {
+    var module = typeof Module !== 'undefined' ? Module :
+        (typeof globalThis !== 'undefined' ? globalThis.Module : null);
+    return !module || module._webPrefetchEnabled !== false ? 1 : 0;
+});
+
+EM_JS(int, TVPWebPrefetchGetTraceEnabled, (), {
+    var module = typeof Module !== 'undefined' ? Module :
+        (typeof globalThis !== 'undefined' ? globalThis.Module : null);
+    return module && module._webPrefetchTrace === true ? 1 : 0;
+});
+
+EM_JS(void, TVPWebPrefetchWriteTrace,
+      (const char *message, int includeStats), {
+          var suffix = '';
+          if(includeStats) {
+              try {
+                  if(typeof VLFS !== 'undefined' &&
+                     typeof VLFS.stats === 'function') {
+                      suffix = ' vlfs=' + JSON.stringify(VLFS.stats());
+                  }
+              } catch(e) {
+                  suffix = ' vlfs=<unavailable>';
+              }
+          }
+          console.log('[prefetch] ' + UTF8ToString(message) + suffix);
+      });
 #endif
 
 namespace TJS {
@@ -293,6 +321,27 @@ namespace {
     constexpr size_t TVP_WEB_PREFETCH_QUEUE_LIMIT = 96;
     constexpr tjs_uint TVP_WEB_PREFETCH_READ_SIZE = 256 * 1024;
 
+    int TVPWebPrefetchEnabledState = -1;
+    int TVPWebPrefetchTraceState = -1;
+
+    bool TVPWebPrefetchEnabled() {
+        if(TVPWebPrefetchEnabledState < 0)
+            TVPWebPrefetchEnabledState = TVPWebPrefetchGetEnabled();
+        return TVPWebPrefetchEnabledState != 0;
+    }
+
+    bool TVPWebPrefetchTraceEnabled() {
+        if(TVPWebPrefetchTraceState < 0)
+            TVPWebPrefetchTraceState = TVPWebPrefetchGetTraceEnabled();
+        return TVPWebPrefetchTraceState != 0;
+    }
+
+    void TVPWebPrefetchTrace(const std::string &message,
+                             bool includeStats = false) {
+        if(TVPWebPrefetchTraceEnabled())
+            TVPWebPrefetchWriteTrace(message.c_str(), includeStats ? 1 : 0);
+    }
+
     struct tTVPWebPrefetchTag {
         ttstr Name;
         ttstr Storage;
@@ -308,6 +357,8 @@ namespace {
         ttstr Name;
         std::unique_ptr<tTJSBinaryStream> Stream;
         std::vector<tjs_uint8> Buffer;
+        tjs_uint64 BytesRead = 0;
+        double StartedAt = 0;
 
         explicit tTVPWebBinaryPrefetchTask(const ttstr &name) :
             Name(name), Buffer(TVP_WEB_PREFETCH_READ_SIZE) {}
@@ -315,6 +366,7 @@ namespace {
 
     std::unique_ptr<tTVPWebBinaryPrefetchTask> TVPWebBinaryPrefetchTask;
     bool TVPWebBinaryPrefetchScheduled = false;
+    bool TVPWebPrefetchDisabledLogged = false;
 
     bool TVPWebPrefetchIsSpace(tjs_char ch) {
         return ch == TJS_W(' ') || ch == TJS_W('\t');
@@ -506,6 +558,22 @@ namespace {
             name, controls, sizeof(controls) / sizeof(controls[0]));
     }
 
+    void TVPFinishWebBinaryPrefetch(const char *status) {
+        if(!TVPWebBinaryPrefetchTask)
+            return;
+        const double elapsed = TVPWebBinaryPrefetchTask->StartedAt > 0
+            ? emscripten_get_now() - TVPWebBinaryPrefetchTask->StartedAt
+            : 0;
+        TVPWebPrefetchTrace(
+            std::string("binary-") + status + " storage='" +
+                TVPKAGTraceNarrow(TVPWebBinaryPrefetchTask->Name) +
+                "' bytes=" +
+                std::to_string(TVPWebBinaryPrefetchTask->BytesRead) +
+                " elapsedMs=" + std::to_string(elapsed),
+            true);
+        TVPWebBinaryPrefetchTask.reset();
+    }
+
     void TVPProcessWebBinaryPrefetch(void *) {
         if(!TVPWebBinaryPrefetchTask) {
             if(TVPWebBinaryPrefetchQueue.empty()) {
@@ -516,13 +584,20 @@ namespace {
                 std::make_unique<tTVPWebBinaryPrefetchTask>(
                     TVPWebBinaryPrefetchQueue.front());
             TVPWebBinaryPrefetchQueue.pop_front();
+            TVPWebBinaryPrefetchTask->StartedAt = emscripten_get_now();
+            TVPWebPrefetchTrace(
+                "binary-start storage='" +
+                    TVPKAGTraceNarrow(TVPWebBinaryPrefetchTask->Name) +
+                    "' remaining=" +
+                    std::to_string(TVPWebBinaryPrefetchQueue.size()),
+                true);
             try {
                 TVPWebBinaryPrefetchTask->Stream.reset(TVPCreateStream(
                     TVPWebBinaryPrefetchTask->Name, TJS_BS_READ));
                 if(!TVPWebBinaryPrefetchTask->Stream)
-                    TVPWebBinaryPrefetchTask.reset();
+                    TVPFinishWebBinaryPrefetch("failed");
             } catch(...) {
-                TVPWebBinaryPrefetchTask.reset();
+                TVPFinishWebBinaryPrefetch("failed");
             }
         }
 
@@ -532,29 +607,43 @@ namespace {
                     TVPWebBinaryPrefetchTask->Buffer.data(),
                     static_cast<tjs_uint>(
                         TVPWebBinaryPrefetchTask->Buffer.size()));
+                TVPWebBinaryPrefetchTask->BytesRead += read;
                 if(read == 0)
-                    TVPWebBinaryPrefetchTask.reset();
+                    TVPFinishWebBinaryPrefetch("done");
             } catch(...) {
                 // 静态前瞻允许候选不存在；失败只表示该候选不适合预载，
                 // 不能影响真实 KAG 执行。
-                TVPWebBinaryPrefetchTask.reset();
+                TVPFinishWebBinaryPrefetch("failed");
             }
         }
         emscripten_async_call(TVPProcessWebBinaryPrefetch, nullptr, 0);
     }
 
-    void TVPQueueWebBinaryPrefetch(const ttstr &storage) {
+    bool TVPQueueWebBinaryPrefetch(const ttstr &storage,
+                                   const ttstr &tagName,
+                                   tjs_int lineIndex) {
         if(TVPWebBinaryPrefetchSeen.find(storage) !=
-               TVPWebBinaryPrefetchSeen.end() ||
-           TVPWebBinaryPrefetchQueue.size() >=
-               TVP_WEB_PREFETCH_QUEUE_LIMIT)
-            return;
+           TVPWebBinaryPrefetchSeen.end())
+            return false;
+        if(TVPWebBinaryPrefetchQueue.size() >=
+           TVP_WEB_PREFETCH_QUEUE_LIMIT) {
+            TVPWebPrefetchTrace(
+                "binary-drop queue-full storage='" +
+                TVPKAGTraceNarrow(storage) + "'");
+            return false;
+        }
         TVPWebBinaryPrefetchSeen.insert(storage);
         TVPWebBinaryPrefetchQueue.push_back(storage);
+        TVPWebPrefetchTrace(
+            "binary-queued line=" + std::to_string(lineIndex) +
+            " tag='" + TVPKAGTraceNarrow(tagName) + "' storage='" +
+            TVPKAGTraceNarrow(storage) + "' depth=" +
+            std::to_string(TVPWebBinaryPrefetchQueue.size()));
         if(!TVPWebBinaryPrefetchScheduled) {
             TVPWebBinaryPrefetchScheduled = true;
             emscripten_async_call(TVPProcessWebBinaryPrefetch, nullptr, 0);
         }
+        return true;
     }
 }
 #endif
@@ -2986,6 +3075,13 @@ parse_start:
 //---------------------------------------------------------------------------
 #ifdef EMSCRIPTEN
 void tTJSNI_KAGParser::QueueWebScenarioPrefetch() {
+    if(!TVPWebPrefetchEnabled()) {
+        if(!TVPWebPrefetchDisabledLogged) {
+            TVPWebPrefetchDisabledLogged = true;
+            TVPWebPrefetchTrace("disabled");
+        }
+        return;
+    }
     if(!Scenario || !Lines || LineCount <= 0 || CurLine < 0 ||
        CurLine >= LineCount)
         return;
@@ -3007,26 +3103,44 @@ void tTJSNI_KAGParser::QueueWebScenarioPrefetch() {
     std::vector<ttstr> graphics;
     tjs_int waits = 0;
     bool stop = false;
+    size_t binaryQueued = 0;
+    size_t dynamicSkipped = 0;
+    ttstr stopTag;
 
-    auto acceptTag = [&](const tTVPWebPrefetchTag &tag) {
+    auto acceptTag = [&](const tTVPWebPrefetchTag &tag, tjs_int lineIndex) {
         if(tag.HasStorage && !tag.DynamicStorage) {
             switch(TVPClassifyWebPrefetchStorage(tag)) {
                 case tTVPWebPrefetchKind::Graphic:
-                    if(TVPWebGraphicPrefetchSeen.insert(tag.Storage).second)
+                    if(TVPWebGraphicPrefetchSeen.insert(tag.Storage).second) {
                         graphics.push_back(tag.Storage);
+                        TVPWebPrefetchTrace(
+                            "graphic-queued line=" +
+                            std::to_string(lineIndex) + " storage='" +
+                            TVPKAGTraceNarrow(tag.Storage) + "'");
+                    }
                     break;
                 case tTVPWebPrefetchKind::Binary:
-                    TVPQueueWebBinaryPrefetch(tag.Storage);
+                    if(TVPQueueWebBinaryPrefetch(
+                           tag.Storage, tag.Name, lineIndex))
+                        ++binaryQueued;
                     break;
                 case tTVPWebPrefetchKind::None:
                     break;
             }
+        } else if(tag.HasStorage) {
+            ++dynamicSkipped;
+            TVPWebPrefetchTrace(
+                "dynamic-skip line=" + std::to_string(lineIndex) +
+                " tag='" + TVPKAGTraceNarrow(tag.Name) + "' storage='" +
+                TVPKAGTraceNarrow(tag.Storage) + "'");
         }
         if(TVPWebPrefetchIsWaitTag(tag.Name))
             ++waits;
         if(TVPWebPrefetchIsControlTransfer(tag.Name) ||
-           TVPWebPrefetchEqualsAscii(tag.Name, "iscript"))
+           TVPWebPrefetchEqualsAscii(tag.Name, "iscript")) {
             stop = true;
+            stopTag = tag.Name;
+        }
     };
 
     for(tjs_int lineIndex = start; lineIndex < end; ++lineIndex) {
@@ -3043,7 +3157,7 @@ void tTJSNI_KAGParser::QueueWebScenarioPrefetch() {
                 tTVPWebPrefetchTag tag;
                 if(TVPParseWebPrefetchTag(
                        line + first + 1, length - first - 1, tag))
-                    acceptTag(tag);
+                    acceptTag(tag, lineIndex);
             } else {
                 tjs_int pos = first;
                 while(pos < length) {
@@ -3071,7 +3185,7 @@ void tTJSNI_KAGParser::QueueWebScenarioPrefetch() {
                     tTVPWebPrefetchTag tag;
                     if(TVPParseWebPrefetchTag(
                            line + bodyStart, pos - bodyStart, tag))
-                        acceptTag(tag);
+                        acceptTag(tag, lineIndex);
                     if(pos < length)
                         ++pos;
                     if(stop || waits >= TVP_WEB_PREFETCH_WAIT_LIMIT)
@@ -3087,6 +3201,25 @@ void tTJSNI_KAGParser::QueueWebScenarioPrefetch() {
 
     if(!graphics.empty())
         TVPTouchImages(graphics, 0, 0);
+
+    std::string reason;
+    if(stop)
+        reason = "control:" + TVPKAGTraceNarrow(stopTag);
+    else if(waits >= TVP_WEB_PREFETCH_WAIT_LIMIT)
+        reason = "wait-limit";
+    else if(WebPrefetchThroughLine + 1 >= LineCount)
+        reason = "scenario-end";
+    else
+        reason = "line-limit";
+    TVPWebPrefetchTrace(
+        "scan storage='" + TVPKAGTraceNarrow(StorageName) + "' current=" +
+            std::to_string(CurLine) + " lines=" + std::to_string(start) +
+            "-" + std::to_string(WebPrefetchThroughLine) + " waits=" +
+            std::to_string(waits) + " graphics=" +
+            std::to_string(graphics.size()) + " binary=" +
+            std::to_string(binaryQueued) + " dynamicSkipped=" +
+            std::to_string(dynamicSkipped) + " stop=" + reason,
+        true);
 }
 #endif
 

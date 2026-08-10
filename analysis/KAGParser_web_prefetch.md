@@ -30,3 +30,8 @@ return TJS_S_OK;
 条件或调用栈。字面图片交给已有 `TVPTouchImages`，语音交给按 256 KiB 小步
 读取的 `TVPCreateStream` 队列。该逻辑是 Emscripten 平台边界，不改变上述二进制
 调用链的返回值和状态机分支。
+
+诊断开关由页面在 glue 注入前写入 `Module._webPrefetchEnabled` 与
+`Module._webPrefetchTrace`。C++ 只读取这两个平台槽位；`?prefetch=0` 仅绕过
+后置的 Web 前瞻，`sub_561F3C` 仍先完整执行且返回值不变。追踪输出扫描窗口、
+静态候选、二进制流字节数/耗时，并在关键事件采样 `VLFS.stats()`。

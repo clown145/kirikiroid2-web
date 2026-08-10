@@ -20,6 +20,7 @@ let xp3Resolve = null;
 const { phase, statusText, progress, errorInfo, boot, loadSource } = useEngine();
 const { isFullscreen, toggle: toggleFullscreen, available: fullscreenAvailable } =
     useFullscreen(container);
+const pageParams = new URLSearchParams(location.search);
 
 // /play/local 是"打开本地文件"入口，不对应任何库里的条目
 const gameId = decodeURIComponent(location.pathname.replace(/^\/play\/?/, ''));
@@ -29,10 +30,9 @@ const gameId = decodeURIComponent(location.pathname.replace(/^\/play\/?/, ''));
 // 也是唯一能脱离游戏库单测一个 xp3 的办法。旧 js/app.js 有这个能力，
 // 换 Vue 后必须保留，否则 `--xp3` 那套调试流程直接失效。
 const urlSource = (() => {
-    const p = new URLSearchParams(location.search);
-    const xp3 = p.get('xp3');
-    const zip = p.get('game');
-    const entry = p.get('entry') || undefined;
+    const xp3 = pageParams.get('xp3');
+    const zip = pageParams.get('game');
+    const entry = pageParams.get('entry') || undefined;
     // 与旧 app.js 一致：?game= 优先于 ?xp3=，两个都给时不猜意图
     if (zip) return { type: 'zip-url', url: zip, entry };
     if (xp3) return { type: 'xp3-url', url: xp3 };
@@ -142,8 +142,9 @@ onMounted(async () => {
         return;
     }
 
-    const params = new URLSearchParams(location.search);
-    const renderer = window.KrKr2FS.normalizeRenderer(params.get('renderer'));
+    const renderer = window.KrKr2FS.normalizeRenderer(pageParams.get('renderer'));
+    const prefetchEnabled = pageParams.get('prefetch') !== '0';
+    const prefetchTrace = pageParams.get('prefetchTrace') === '1';
 
     // 引擎脚本必须用绝对地址：当前页在 /play/<id>，
     // 相对的 'index.js' 会解析成 /play/index.js 而 404。
@@ -154,7 +155,9 @@ onMounted(async () => {
     boot({
         canvas: canvas.value,
         renderer,
-        engineScript: engineBase() + 'index.js'
+        engineScript: engineBase() + 'index.js',
+        prefetchEnabled,
+        prefetchTrace
     });
 
     if (isLocalMode) return;   // 等 LocalPicker 给数据源

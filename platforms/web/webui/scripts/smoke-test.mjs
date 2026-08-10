@@ -146,7 +146,9 @@ await visit('/admin', {
 });
 
 // --- 播放页（本地文件模式，不需要真游戏数据）---
-await visit('/play/local', {
+// 同时验证诊断参数在 glue 注入前写入 Module；C++ 侧只读这两个槽位，
+// 不直接碰 window.location，因此线程构建也不会丢参数。
+await visit('/play/local?prefetch=0&prefetchTrace=1', {
     wait: 4000,
     assert: async (page) => {
         const hasEngine = await page.evaluate(() => ({
@@ -155,6 +157,8 @@ await visit('/play/local', {
             idb: typeof window.KrKr2IDB?.listSpaces === 'function',
             config: typeof window.KrKr2Config?.assetBase === 'string',
             assetBase: window.KrKr2Config?.assetBase,
+            prefetchEnabled: window.Module?._webPrefetchEnabled,
+            prefetchTrace: window.Module?._webPrefetchTrace,
             crossOriginIsolated: window.crossOriginIsolated
         }));
         console.log('    assetBase =', hasEngine.assetBase,
@@ -164,6 +168,8 @@ await visit('/play/local', {
             'VLFS 已加载': hasEngine.vlfs,
             'KrKr2IDB 已加载': hasEngine.idb,
             'assetBase 配置存在': hasEngine.config,
+            'prefetch=0 关闭资源前瞻': hasEngine.prefetchEnabled === false,
+            'prefetchTrace=1 开启诊断': hasEngine.prefetchTrace === true,
             '跨源隔离生效(SharedArrayBuffer 可用)': hasEngine.crossOriginIsolated === true,
             '显示本地文件选择器': !!(await page.$('.drop'))
         };

@@ -24,7 +24,8 @@ export function useEngine() {
 
     onUnmounted(() => { disposed = true; });
 
-    function boot({ canvas, renderer, engineScript, saveSpace }) {
+    function boot({ canvas, renderer, engineScript, saveSpace,
+                    prefetchEnabled, prefetchTrace }) {
         const Engine = window.KrKr2Engine;
         if (!Engine) {
             errorInfo.value = {
@@ -40,6 +41,8 @@ export function useEngine() {
             renderer,
             engineScript,
             saveSpace,
+            prefetchEnabled,
+            prefetchTrace,
 
             onStatus: guard((text, pct) => {
                 if (text) statusText.value = text;

@@ -241,6 +241,19 @@ OPFS，ZIP 的 deflate 成品也在同一游戏目录下复用。服务器提供
 使用会话缓存以避免误用旧资源。画廊每张卡片显示容量并可单独清理，存档仍在独立
 的 IndexedDB space 中。
 
+排查预载造成的卡顿时，可在播放页 URL 追加诊断参数：
+
+```text
+?prefetch=0                         # 关闭预载，做同场景 A/B 对照
+?prefetchTrace=1                    # 输出扫描、候选、队列、耗时和 VLFS 统计
+?prefetch=0&prefetchTrace=1         # 确认关闭状态也会输出 config/disabled
+```
+
+诊断日志统一以 `[prefetch]` 开头；图片和音频的排队日志都带脚本行号，音频还会
+带原始标签名。`graphic-queued` 只表示图片已交给异步图片加载器；
+`binary-done` 表示音频流已完整读完。日志中的 `vlfs={...}` 可用于判断
+`persistentHit`（OPFS 命中）与 `persistentMiss`（新分块下载）的变化。
+
 ---
 
 ## 测试
