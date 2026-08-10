@@ -334,8 +334,8 @@ public:
 private:
     iTJSDispatch2 *_GetNextTag();
 #ifdef EMSCRIPTEN
-    // Web 平台只读前瞻游标。它不克隆/推进真实解析器，也不执行 TJS；仅从
-    // Scenario 原始行提取字面 storage，随后交给既有 Storage/Graphics 路径。
+    // Web 平台只读前瞻游标。它不克隆/推进真实解析器，也不执行 TJS；从
+    // Scenario 原始行提取字面资源，并把静态 call/jump 目标交给异步前瞻队列。
     ttstr WebPrefetchStorageName;
     tjs_int WebPrefetchThroughLine;
     void QueueWebScenarioPrefetch();

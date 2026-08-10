@@ -48,6 +48,9 @@ EM_JS(int, TVPWebPrefetchGetTraceEnabled, (), {
 
 EM_JS(void, TVPWebPrefetchWriteTrace,
       (const char *message, int includeStats), {
+          var global = typeof globalThis !== 'undefined' ? globalThis : window;
+          var records = global.__KRKR2_PREFETCH_LOGS__ ||
+              (global.__KRKR2_PREFETCH_LOGS__ = []);
           var suffix = '';
           if(includeStats) {
               try {
@@ -59,13 +62,21 @@ EM_JS(void, TVPWebPrefetchWriteTrace,
                   suffix = ' vlfs=<unavailable>';
               }
           }
-          console.log('[prefetch] ' + UTF8ToString(message) + suffix);
+          var line = '[prefetch] ' + UTF8ToString(message) + suffix;
+          records.push(line);
+          if(records.length > 200)
+              records.splice(0, records.length - 200);
+          console.log(line);
       });
 #endif
 
 namespace TJS {
     ttstr TJSMapGlobalStringMap(const ttstr &string);
 }
+
+#ifdef EMSCRIPTEN
+tTVPScenarioCacheItem *TVPGetScenario(const ttstr &storagename, bool isstring);
+#endif
 
 //---------------------------------------------------------------------------
 /*
@@ -316,10 +327,13 @@ namespace {
 
 #ifdef EMSCRIPTEN
 namespace {
-    constexpr tjs_int TVP_WEB_PREFETCH_MAX_LINES = 240;
-    constexpr tjs_int TVP_WEB_PREFETCH_WAIT_LIMIT = 4;
+    constexpr tjs_int TVP_WEB_PREFETCH_MAX_LINES = 320;
+    constexpr tjs_int TVP_WEB_PREFETCH_WAIT_LIMIT = 16;
     constexpr size_t TVP_WEB_PREFETCH_QUEUE_LIMIT = 96;
+    constexpr size_t TVP_WEB_PREFETCH_SCENARIO_QUEUE_LIMIT = 64;
+    constexpr int TVP_WEB_PREFETCH_SCENARIO_DEPTH_LIMIT = 8;
     constexpr tjs_uint TVP_WEB_PREFETCH_READ_SIZE = 256 * 1024;
+    constexpr int TVP_WEB_PREFETCH_YIELD_MS = 8;
 
     int TVPWebPrefetchEnabledState = -1;
     int TVPWebPrefetchTraceState = -1;
@@ -345,13 +359,35 @@ namespace {
     struct tTVPWebPrefetchTag {
         ttstr Name;
         ttstr Storage;
+        ttstr Target;
         bool HasStorage = false;
         bool DynamicStorage = false;
+        bool HasTarget = false;
+        bool DynamicTarget = false;
     };
 
+    struct tTVPWebScenarioPrefetchTask {
+        ttstr Storage;
+        ttstr Target;
+        int Depth = 0;
+    };
+
+    struct tTVPWebScenarioScanResult {
+        tjs_int ThroughLine = -1;
+        tjs_int Waits = 0;
+        size_t GraphicsQueued = 0;
+        size_t BinaryQueued = 0;
+        size_t DynamicSkipped = 0;
+        size_t ControlsQueued = 0;
+        std::string StopReason;
+    };
+
+    std::deque<ttstr> TVPWebGraphicPrefetchQueue;
     std::deque<ttstr> TVPWebBinaryPrefetchQueue;
+    std::deque<tTVPWebScenarioPrefetchTask> TVPWebScenarioPrefetchQueue;
     std::set<ttstr> TVPWebBinaryPrefetchSeen;
     std::set<ttstr> TVPWebGraphicPrefetchSeen;
+    std::set<std::pair<ttstr, ttstr>> TVPWebScenarioPrefetchSeen;
 
     struct tTVPWebBinaryPrefetchTask {
         ttstr Name;
@@ -365,7 +401,9 @@ namespace {
     };
 
     std::unique_ptr<tTVPWebBinaryPrefetchTask> TVPWebBinaryPrefetchTask;
+    bool TVPWebGraphicPrefetchScheduled = false;
     bool TVPWebBinaryPrefetchScheduled = false;
+    bool TVPWebScenarioPrefetchScheduled = false;
     bool TVPWebPrefetchDisabledLogged = false;
 
     bool TVPWebPrefetchIsSpace(tjs_char ch) {
@@ -485,6 +523,15 @@ namespace {
                     tag.Storage = TVPWebPrefetchUnescape(
                         text + valueStart, valueLength);
                 }
+            } else if(TVPWebPrefetchSpanEqualsAscii(
+                          text + keyStart, keyLength, "target")) {
+                tag.HasTarget = valueLength > 0;
+                if(tag.HasTarget) {
+                    tag.DynamicTarget = text[valueStart] == TJS_W('&') ||
+                        text[valueStart] == TJS_W('%');
+                    tag.Target = TVPWebPrefetchUnescape(
+                        text + valueStart, valueLength);
+                }
             }
         }
         return true;
@@ -550,12 +597,63 @@ namespace {
             name, waits, sizeof(waits) / sizeof(waits[0]));
     }
 
-    bool TVPWebPrefetchIsControlTransfer(const ttstr &name) {
-        static const char *const controls[] = {
-            "jump", "call", "return"
-        };
-        return TVPWebPrefetchNameIn(
-            name, controls, sizeof(controls) / sizeof(controls[0]));
+    void TVPProcessWebGraphicPrefetch(void *) {
+        if(TVPWebGraphicPrefetchQueue.empty()) {
+            TVPWebGraphicPrefetchScheduled = false;
+            return;
+        }
+
+        const ttstr storage = TVPWebGraphicPrefetchQueue.front();
+        TVPWebGraphicPrefetchQueue.pop_front();
+        TVPWebPrefetchTrace(
+            "graphic-start storage='" + TVPKAGTraceNarrow(storage) +
+                "' remaining=" +
+                std::to_string(TVPWebGraphicPrefetchQueue.size()),
+            true);
+        try {
+            TVPTouchImages(std::vector<ttstr>{storage}, 0, 0);
+            TVPWebPrefetchTrace(
+                "graphic-dispatched storage='" +
+                    TVPKAGTraceNarrow(storage) + "'",
+                true);
+        } catch(...) {
+            TVPWebPrefetchTrace(
+                "graphic-failed storage='" + TVPKAGTraceNarrow(storage) +
+                    "'",
+                true);
+        }
+        emscripten_async_call(TVPProcessWebGraphicPrefetch, nullptr,
+                              TVP_WEB_PREFETCH_YIELD_MS);
+    }
+
+    bool TVPQueueWebGraphicPrefetch(const ttstr &storage,
+                                    const ttstr &scenarioStorage,
+                                    tjs_int lineIndex) {
+        if(storage.IsEmpty() ||
+           TVPWebGraphicPrefetchSeen.find(storage) !=
+               TVPWebGraphicPrefetchSeen.end())
+            return false;
+        if(TVPWebGraphicPrefetchQueue.size() >=
+           TVP_WEB_PREFETCH_QUEUE_LIMIT) {
+            TVPWebPrefetchTrace(
+                "graphic-drop queue-full storage='" +
+                TVPKAGTraceNarrow(storage) + "'");
+            return false;
+        }
+        TVPWebGraphicPrefetchSeen.insert(storage);
+        TVPWebGraphicPrefetchQueue.push_back(storage);
+        TVPWebPrefetchTrace(
+            "graphic-queued scenario='" +
+            TVPKAGTraceNarrow(scenarioStorage) + "' line=" +
+            std::to_string(lineIndex) + " storage='" +
+            TVPKAGTraceNarrow(storage) + "' depth=" +
+            std::to_string(TVPWebGraphicPrefetchQueue.size()));
+        if(!TVPWebGraphicPrefetchScheduled) {
+            TVPWebGraphicPrefetchScheduled = true;
+            emscripten_async_call(TVPProcessWebGraphicPrefetch, nullptr,
+                                  TVP_WEB_PREFETCH_YIELD_MS);
+        }
+        return true;
     }
 
     void TVPFinishWebBinaryPrefetch(const char *status) {
@@ -616,13 +714,16 @@ namespace {
                 TVPFinishWebBinaryPrefetch("failed");
             }
         }
-        emscripten_async_call(TVPProcessWebBinaryPrefetch, nullptr, 0);
+        emscripten_async_call(TVPProcessWebBinaryPrefetch, nullptr,
+                              TVP_WEB_PREFETCH_YIELD_MS);
     }
 
     bool TVPQueueWebBinaryPrefetch(const ttstr &storage,
                                    const ttstr &tagName,
+                                   const ttstr &scenarioStorage,
                                    tjs_int lineIndex) {
-        if(TVPWebBinaryPrefetchSeen.find(storage) !=
+        if(storage.IsEmpty() ||
+           TVPWebBinaryPrefetchSeen.find(storage) !=
            TVPWebBinaryPrefetchSeen.end())
             return false;
         if(TVPWebBinaryPrefetchQueue.size() >=
@@ -635,15 +736,288 @@ namespace {
         TVPWebBinaryPrefetchSeen.insert(storage);
         TVPWebBinaryPrefetchQueue.push_back(storage);
         TVPWebPrefetchTrace(
-            "binary-queued line=" + std::to_string(lineIndex) +
+            "binary-queued scenario='" +
+            TVPKAGTraceNarrow(scenarioStorage) + "' line=" +
+            std::to_string(lineIndex) +
             " tag='" + TVPKAGTraceNarrow(tagName) + "' storage='" +
             TVPKAGTraceNarrow(storage) + "' depth=" +
             std::to_string(TVPWebBinaryPrefetchQueue.size()));
         if(!TVPWebBinaryPrefetchScheduled) {
             TVPWebBinaryPrefetchScheduled = true;
-            emscripten_async_call(TVPProcessWebBinaryPrefetch, nullptr, 0);
+            emscripten_async_call(TVPProcessWebBinaryPrefetch, nullptr,
+                                  TVP_WEB_PREFETCH_YIELD_MS);
         }
         return true;
+    }
+
+    void TVPProcessWebScenarioPrefetch(void *);
+
+    bool TVPQueueWebScenarioPrefetch(const ttstr &sourceStorage,
+                                     tjs_int lineIndex,
+                                     const tTVPWebPrefetchTag &tag,
+                                     int depth) {
+        if(depth > TVP_WEB_PREFETCH_SCENARIO_DEPTH_LIMIT) {
+            TVPWebPrefetchTrace(
+                "control-drop depth-limit from='" +
+                TVPKAGTraceNarrow(sourceStorage) + "' line=" +
+                std::to_string(lineIndex) + " tag='" +
+                TVPKAGTraceNarrow(tag.Name) + "'");
+            return false;
+        }
+
+        const ttstr storage = tag.HasStorage ? tag.Storage : sourceStorage;
+        const ttstr target = tag.HasTarget ? tag.Target : ttstr();
+        if(storage.IsEmpty() || (!tag.HasStorage && !tag.HasTarget)) {
+            TVPWebPrefetchTrace(
+                "control-skip empty-target from='" +
+                TVPKAGTraceNarrow(sourceStorage) + "' line=" +
+                std::to_string(lineIndex) + " tag='" +
+                TVPKAGTraceNarrow(tag.Name) + "'");
+            return false;
+        }
+
+        const std::pair<ttstr, ttstr> key(storage, target);
+        if(TVPWebScenarioPrefetchSeen.find(key) !=
+           TVPWebScenarioPrefetchSeen.end())
+            return false;
+        if(TVPWebScenarioPrefetchQueue.size() >=
+           TVP_WEB_PREFETCH_SCENARIO_QUEUE_LIMIT) {
+            TVPWebPrefetchTrace(
+                "control-drop queue-full storage='" +
+                TVPKAGTraceNarrow(storage) + "' target='" +
+                TVPKAGTraceNarrow(target) + "'");
+            return false;
+        }
+
+        TVPWebScenarioPrefetchSeen.insert(key);
+        TVPWebScenarioPrefetchQueue.push_back({storage, target, depth});
+        TVPWebPrefetchTrace(
+            "control-follow from='" + TVPKAGTraceNarrow(sourceStorage) +
+            "' line=" + std::to_string(lineIndex) + " tag='" +
+            TVPKAGTraceNarrow(tag.Name) + "' storage='" +
+            TVPKAGTraceNarrow(storage) + "' target='" +
+            TVPKAGTraceNarrow(target) + "' depth=" +
+            std::to_string(depth));
+        if(!TVPWebScenarioPrefetchScheduled) {
+            TVPWebScenarioPrefetchScheduled = true;
+            emscripten_async_call(TVPProcessWebScenarioPrefetch, nullptr,
+                                  TVP_WEB_PREFETCH_YIELD_MS);
+        }
+        return true;
+    }
+
+    tTVPWebScenarioScanResult TVPScanWebScenario(
+        const ttstr &storage, tTVPScenarioCacheItem *scenario,
+        tjs_int start, int depth) {
+        tTVPWebScenarioScanResult result;
+        if(!scenario)
+            return result;
+
+        tTVPScenarioCacheItem::tLine *lines = scenario->GetLines();
+        const tjs_int lineCount = scenario->GetLineCount();
+        if(!lines || start < 0 || start >= lineCount)
+            return result;
+        const tjs_int end = std::min(
+            lineCount, start + TVP_WEB_PREFETCH_MAX_LINES);
+        bool stop = false;
+
+        auto acceptTag = [&](const tTVPWebPrefetchTag &tag,
+                             tjs_int lineIndex) {
+            if(tag.HasStorage && !tag.DynamicStorage) {
+                switch(TVPClassifyWebPrefetchStorage(tag)) {
+                    case tTVPWebPrefetchKind::Graphic:
+                        if(TVPQueueWebGraphicPrefetch(
+                               tag.Storage, storage, lineIndex))
+                            ++result.GraphicsQueued;
+                        break;
+                    case tTVPWebPrefetchKind::Binary:
+                        if(TVPQueueWebBinaryPrefetch(
+                               tag.Storage, tag.Name, storage, lineIndex))
+                            ++result.BinaryQueued;
+                        break;
+                    case tTVPWebPrefetchKind::None:
+                        break;
+                }
+            } else if(tag.HasStorage && tag.DynamicStorage) {
+                ++result.DynamicSkipped;
+                TVPWebPrefetchTrace(
+                    "dynamic-skip scenario='" +
+                    TVPKAGTraceNarrow(storage) + "' line=" +
+                    std::to_string(lineIndex) + " tag='" +
+                    TVPKAGTraceNarrow(tag.Name) + "' storage='" +
+                    TVPKAGTraceNarrow(tag.Storage) + "'");
+            }
+
+            if(TVPWebPrefetchIsWaitTag(tag.Name))
+                ++result.Waits;
+
+            const bool jump = TVPWebPrefetchEqualsAscii(tag.Name, "jump");
+            const bool call = TVPWebPrefetchEqualsAscii(tag.Name, "call");
+            if(jump || call) {
+                if(tag.DynamicStorage || tag.DynamicTarget) {
+                    ++result.DynamicSkipped;
+                    result.StopReason = "control-dynamic:" +
+                        TVPKAGTraceNarrow(tag.Name);
+                    TVPWebPrefetchTrace(
+                        "control-dynamic-skip from='" +
+                        TVPKAGTraceNarrow(storage) + "' line=" +
+                        std::to_string(lineIndex) + " tag='" +
+                        TVPKAGTraceNarrow(tag.Name) + "' storage='" +
+                        TVPKAGTraceNarrow(tag.Storage) + "' target='" +
+                        TVPKAGTraceNarrow(tag.Target) + "'");
+                    stop = true;
+                    return;
+                }
+                if(TVPQueueWebScenarioPrefetch(
+                       storage, lineIndex, tag, depth + 1))
+                    ++result.ControlsQueued;
+                // call 返回后还会继续当前脚本；jump 则只沿目标继续。
+                if(jump) {
+                    result.StopReason = "control:jump";
+                    stop = true;
+                }
+            } else if(TVPWebPrefetchEqualsAscii(tag.Name, "return") ||
+                      TVPWebPrefetchEqualsAscii(tag.Name, "iscript")) {
+                result.StopReason = "control:" +
+                    TVPKAGTraceNarrow(tag.Name);
+                stop = true;
+            }
+        };
+
+        for(tjs_int lineIndex = start; lineIndex < end; ++lineIndex) {
+            const tjs_char *line = lines[lineIndex].Start;
+            const tjs_int length = lines[lineIndex].Length;
+            tjs_int first = 0;
+            while(first < length && TVPWebPrefetchIsSpace(line[first]))
+                ++first;
+
+            // KAG 注释与标签行中即使出现类似 [image] 的文字也不执行。
+            if(first < length && line[first] != TJS_W(';') &&
+               line[first] != TJS_W('*')) {
+                if(line[first] == TJS_W('@')) {
+                    tTVPWebPrefetchTag tag;
+                    if(TVPParseWebPrefetchTag(
+                           line + first + 1, length - first - 1, tag))
+                        acceptTag(tag, lineIndex);
+                } else {
+                    tjs_int pos = first;
+                    while(pos < length) {
+                        if(line[pos] != TJS_W('[')) {
+                            ++pos;
+                            continue;
+                        }
+                        const tjs_int bodyStart = ++pos;
+                        tjs_char quote = 0;
+                        while(pos < length) {
+                            const tjs_char ch = line[pos];
+                            if(ch == TJS_W('`') && pos + 1 < length) {
+                                pos += 2;
+                                continue;
+                            } else if(quote) {
+                                if(ch == quote)
+                                    quote = 0;
+                            } else if(ch == TJS_W('"') ||
+                                      ch == TJS_W('\'')) {
+                                quote = ch;
+                            } else if(ch == TJS_W(']')) {
+                                break;
+                            }
+                            ++pos;
+                        }
+                        tTVPWebPrefetchTag tag;
+                        if(TVPParseWebPrefetchTag(
+                               line + bodyStart, pos - bodyStart, tag))
+                            acceptTag(tag, lineIndex);
+                        if(pos < length)
+                            ++pos;
+                        if(stop ||
+                           result.Waits >= TVP_WEB_PREFETCH_WAIT_LIMIT)
+                            break;
+                    }
+                }
+            }
+
+            result.ThroughLine = lineIndex;
+            if(stop || result.Waits >= TVP_WEB_PREFETCH_WAIT_LIMIT)
+                break;
+        }
+
+        if(result.StopReason.empty()) {
+            if(result.Waits >= TVP_WEB_PREFETCH_WAIT_LIMIT)
+                result.StopReason = "wait-limit";
+            else if(result.ThroughLine + 1 >= lineCount)
+                result.StopReason = "scenario-end";
+            else
+                result.StopReason = "line-limit";
+        }
+        return result;
+    }
+
+    void TVPProcessWebScenarioPrefetch(void *) {
+        if(TVPWebScenarioPrefetchQueue.empty()) {
+            TVPWebScenarioPrefetchScheduled = false;
+            return;
+        }
+
+        const tTVPWebScenarioPrefetchTask task =
+            TVPWebScenarioPrefetchQueue.front();
+        TVPWebScenarioPrefetchQueue.pop_front();
+        tTVPScenarioCacheItem *scenario = nullptr;
+        try {
+            TVPWebPrefetchTrace(
+                "scenario-start storage='" +
+                TVPKAGTraceNarrow(task.Storage) + "' target='" +
+                TVPKAGTraceNarrow(task.Target) + "' depth=" +
+                std::to_string(task.Depth));
+            scenario = TVPGetScenario(task.Storage, false);
+            tjs_int start = 0;
+            if(!task.Target.IsEmpty()) {
+                scenario->EnsureLabelCache();
+                const tTVPScenarioCacheItem::tLabelCacheData *label =
+                    scenario->GetLabelCache().Find(task.Target);
+                if(!label) {
+                    TVPWebPrefetchTrace(
+                        "scenario-failed label-not-found storage='" +
+                        TVPKAGTraceNarrow(task.Storage) + "' target='" +
+                        TVPKAGTraceNarrow(task.Target) + "'");
+                    scenario->Release();
+                    scenario = nullptr;
+                } else {
+                    start = label->Line;
+                }
+            }
+            if(scenario) {
+                const tTVPWebScenarioScanResult result =
+                    TVPScanWebScenario(
+                        task.Storage, scenario, start, task.Depth);
+                TVPWebPrefetchTrace(
+                    "scenario-scan storage='" +
+                        TVPKAGTraceNarrow(task.Storage) + "' target='" +
+                        TVPKAGTraceNarrow(task.Target) + "' lines=" +
+                        std::to_string(start) + "-" +
+                        std::to_string(result.ThroughLine) + " waits=" +
+                        std::to_string(result.Waits) + " graphics=" +
+                        std::to_string(result.GraphicsQueued) + " binary=" +
+                        std::to_string(result.BinaryQueued) + " controls=" +
+                        std::to_string(result.ControlsQueued) +
+                        " dynamicSkipped=" +
+                        std::to_string(result.DynamicSkipped) + " stop=" +
+                        result.StopReason,
+                    true);
+                scenario->Release();
+                scenario = nullptr;
+            }
+        } catch(...) {
+            if(scenario)
+                scenario->Release();
+            TVPWebPrefetchTrace(
+                "scenario-failed storage='" +
+                TVPKAGTraceNarrow(task.Storage) + "' target='" +
+                TVPKAGTraceNarrow(task.Target) + "'");
+        }
+
+        emscripten_async_call(TVPProcessWebScenarioPrefetch, nullptr,
+                              TVP_WEB_PREFETCH_YIELD_MS);
     }
 }
 #endif
@@ -3095,130 +3469,22 @@ void tTJSNI_KAGParser::QueueWebScenarioPrefetch() {
     }
 
     tjs_int start = std::max(CurLine, WebPrefetchThroughLine + 1);
-    const tjs_int end = std::min(
-        LineCount, CurLine + TVP_WEB_PREFETCH_MAX_LINES);
-    if(start >= end)
+    if(start >= LineCount)
         return;
 
-    std::vector<ttstr> graphics;
-    tjs_int waits = 0;
-    bool stop = false;
-    size_t binaryQueued = 0;
-    size_t dynamicSkipped = 0;
-    ttstr stopTag;
-
-    auto acceptTag = [&](const tTVPWebPrefetchTag &tag, tjs_int lineIndex) {
-        if(tag.HasStorage && !tag.DynamicStorage) {
-            switch(TVPClassifyWebPrefetchStorage(tag)) {
-                case tTVPWebPrefetchKind::Graphic:
-                    if(TVPWebGraphicPrefetchSeen.insert(tag.Storage).second) {
-                        graphics.push_back(tag.Storage);
-                        TVPWebPrefetchTrace(
-                            "graphic-queued line=" +
-                            std::to_string(lineIndex) + " storage='" +
-                            TVPKAGTraceNarrow(tag.Storage) + "'");
-                    }
-                    break;
-                case tTVPWebPrefetchKind::Binary:
-                    if(TVPQueueWebBinaryPrefetch(
-                           tag.Storage, tag.Name, lineIndex))
-                        ++binaryQueued;
-                    break;
-                case tTVPWebPrefetchKind::None:
-                    break;
-            }
-        } else if(tag.HasStorage) {
-            ++dynamicSkipped;
-            TVPWebPrefetchTrace(
-                "dynamic-skip line=" + std::to_string(lineIndex) +
-                " tag='" + TVPKAGTraceNarrow(tag.Name) + "' storage='" +
-                TVPKAGTraceNarrow(tag.Storage) + "'");
-        }
-        if(TVPWebPrefetchIsWaitTag(tag.Name))
-            ++waits;
-        if(TVPWebPrefetchIsControlTransfer(tag.Name) ||
-           TVPWebPrefetchEqualsAscii(tag.Name, "iscript")) {
-            stop = true;
-            stopTag = tag.Name;
-        }
-    };
-
-    for(tjs_int lineIndex = start; lineIndex < end; ++lineIndex) {
-        const tjs_char *line = Lines[lineIndex].Start;
-        const tjs_int length = Lines[lineIndex].Length;
-        tjs_int first = 0;
-        while(first < length && TVPWebPrefetchIsSpace(line[first]))
-            ++first;
-
-        // KAG 注释与标签行中即使出现类似 [image] 的文字也不执行。
-        if(first < length && line[first] != TJS_W(';') &&
-           line[first] != TJS_W('*')) {
-            if(line[first] == TJS_W('@')) {
-                tTVPWebPrefetchTag tag;
-                if(TVPParseWebPrefetchTag(
-                       line + first + 1, length - first - 1, tag))
-                    acceptTag(tag, lineIndex);
-            } else {
-                tjs_int pos = first;
-                while(pos < length) {
-                    if(line[pos] != TJS_W('[')) {
-                        ++pos;
-                        continue;
-                    }
-                    const tjs_int bodyStart = ++pos;
-                    tjs_char quote = 0;
-                    while(pos < length) {
-                        const tjs_char ch = line[pos];
-                        if(ch == TJS_W('`') && pos + 1 < length) {
-                            pos += 2;
-                            continue;
-                        } else if(quote) {
-                            if(ch == quote)
-                                quote = 0;
-                        } else if(ch == TJS_W('"') || ch == TJS_W('\'')) {
-                            quote = ch;
-                        } else if(ch == TJS_W(']')) {
-                            break;
-                        }
-                        ++pos;
-                    }
-                    tTVPWebPrefetchTag tag;
-                    if(TVPParseWebPrefetchTag(
-                           line + bodyStart, pos - bodyStart, tag))
-                        acceptTag(tag, lineIndex);
-                    if(pos < length)
-                        ++pos;
-                    if(stop || waits >= TVP_WEB_PREFETCH_WAIT_LIMIT)
-                        break;
-                }
-            }
-        }
-
-        WebPrefetchThroughLine = lineIndex;
-        if(stop || waits >= TVP_WEB_PREFETCH_WAIT_LIMIT)
-            break;
-    }
-
-    if(!graphics.empty())
-        TVPTouchImages(graphics, 0, 0);
-
-    std::string reason;
-    if(stop)
-        reason = "control:" + TVPKAGTraceNarrow(stopTag);
-    else if(waits >= TVP_WEB_PREFETCH_WAIT_LIMIT)
-        reason = "wait-limit";
-    else if(WebPrefetchThroughLine + 1 >= LineCount)
-        reason = "scenario-end";
-    else
-        reason = "line-limit";
+    const tTVPWebScenarioScanResult result =
+        TVPScanWebScenario(StorageName, Scenario, start, 0);
+    WebPrefetchThroughLine = result.ThroughLine;
     TVPWebPrefetchTrace(
         "scan storage='" + TVPKAGTraceNarrow(StorageName) + "' current=" +
             std::to_string(CurLine) + " lines=" + std::to_string(start) +
             "-" + std::to_string(WebPrefetchThroughLine) + " waits=" +
-            std::to_string(waits) + " graphics=" +
-            std::to_string(graphics.size()) + " binary=" +
-            std::to_string(binaryQueued) + " dynamicSkipped=" +
-            std::to_string(dynamicSkipped) + " stop=" + reason,
+            std::to_string(result.Waits) + " graphics=" +
+            std::to_string(result.GraphicsQueued) + " binary=" +
+            std::to_string(result.BinaryQueued) + " controls=" +
+            std::to_string(result.ControlsQueued) + " dynamicSkipped=" +
+            std::to_string(result.DynamicSkipped) + " stop=" +
+            result.StopReason,
         true);
 }
 #endif

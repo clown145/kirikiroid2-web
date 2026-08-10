@@ -9,9 +9,24 @@ const props = defineProps({
 const emit = defineEmits(['close', 'apply']);
 const enabled = ref(props.enabled);
 const trace = ref(props.trace);
+const traceCopyStatus = ref('');
 
 function apply() {
     emit('apply', { enabled: enabled.value, trace: trace.value });
+}
+
+async function copyTraceLogs() {
+    const records = window.__KRKR2_PREFETCH_LOGS__ || [];
+    if (!records.length) {
+        traceCopyStatus.value = '当前还没有诊断记录';
+        return;
+    }
+    try {
+        await navigator.clipboard.writeText(records.join('\n'));
+        traceCopyStatus.value = `已复制最近 ${records.length} 条记录`;
+    } catch (_) {
+        traceCopyStatus.value = '复制失败，请在控制台读取 Info 级别日志';
+    }
 }
 </script>
 
@@ -45,6 +60,13 @@ function apply() {
             <p class="hint">
                 判断卡顿来源时，先保持诊断开启运行一次，再关闭“启用资源预加载”并从同一存档重试。
             </p>
+
+            <div class="trace-actions">
+                <button class="btn btn-ghost btn-sm" type="button" @click="copyTraceLogs">
+                    复制最近诊断日志
+                </button>
+                <span v-if="traceCopyStatus">{{ traceCopyStatus }}</span>
+            </div>
 
             <footer>
                 <button class="btn" type="button" @click="emit('close')">取消</button>
@@ -108,6 +130,13 @@ function apply() {
 .option small { font-size: 11px; line-height: 1.5; color: var(--fg-2); }
 .option input { width: 20px; height: 20px; flex: 0 0 auto; accent-color: var(--fg-0); }
 .hint { margin-top: var(--space-4); }
+.trace-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-top: var(--space-3);
+}
+.trace-actions span { font-size: 11px; color: var(--fg-2); }
 
 footer {
     display: flex;

@@ -8,6 +8,15 @@
 - `sub_55B864 @ 0x55B864` 是 native `getNextTag` 包装：先从 TJS 参数取得
   parser 实例，调用 `sub_561F3C(v11[0])`；非空结果写入 TJS 返回数组并释放，
   空结果写入 void，最后返回 `0`（`TJS_S_OK`）。
+- `sub_560350 @ 0x560350` 是 `LoadScenario`：同名场景只 rewind；否则加载
+  场景、设置行数组并 rewind，然后依次触发 `onScenarioLoad`/`onScenarioLoaded`。
+- `sub_56119C @ 0x56119C` 是 `GoToLabel`：空 target 不动作；非空则查标签缓存，
+  命中后设置当前位置，未命中抛出 `Label not found`。
+- `sub_561F3C @ 0x561F3C` 的 `jump` 与 `call` 都按
+  `storage 非空 -> sub_560350`、`target 非空 -> sub_56119C` 的顺序转移；`call`
+  先经 `sub_5614B0 @ 0x5614B0` 保存返回位置。对应调用点分别为
+  `0x566AAC/0x566ACC`、`0x566BD4/0x566BE8`、`0x566E24/0x566E3C` 与
+  `0x567B08/0x567B1C`；call 的压栈调用点是 `0x567AF4`。
 
 伪代码（保留原始分支含义）：
 
@@ -25,13 +34,26 @@ return TJS_S_OK;
 
 本地 [`KAGParser.cpp`](../cpp/core/base/KAGParser.cpp) 的 `GetNextTag()` 先执行
 原始 `_GetNextTag()`，再调用 `QueueWebScenarioPrefetch()`，最后原样返回指针。
-前瞻只读 `Scenario->GetLines()` 的原始行，最多 240 行/4 个等待点；它不调用
-`getNextTag()`、不执行 `TVPExecuteExpression`、不修改真实 parser 的游标、宏、
-条件或调用栈。字面图片交给已有 `TVPTouchImages`，语音交给按 256 KiB 小步
-读取的 `TVPCreateStream` 队列。该逻辑是 Emscripten 平台边界，不改变上述二进制
-调用链的返回值和状态机分支。
+前瞻只读 `Scenario->GetLines()` 的原始行，每个分支最多 320 行/16 个等待点；它
+不调用 `getNextTag()`、不执行 `TVPExecuteExpression`、不修改真实 parser 的游标、
+宏、条件或调用栈。
+
+对于静态字面 `call/jump`，前瞻按二进制已确认的 storage/target 顺序建立异步
+场景任务：storage 为空时沿当前场景，target 为空时从目标场景开头扫描；target
+非空时使用同一 `EnsureLabelCache()`/`Find()` 语义定位标签。`call` 同时继续扫描
+返回后的当前脚本，`jump` 只沿目标分支；`return`、`iscript` 和动态 storage/target
+终止当前前瞻分支。场景队列限制为 64 个任务、深度为 8，并对 `(storage,target)`
+去重防环；失败只丢弃该预载分支，绝不影响真实 KAG 执行。
+
+图片经单项异步 `TVPTouchImages` 派发，语音/BGM 经 `TVPCreateStream` 按 256 KiB
+小步读取。三类队列的后继任务都至少让出 8 ms；这使预载下载和图片入队不会在一
+次剧情推进中批量执行。`TVPGetScenario(..., false)` 有意不调用真实 `LoadScenario`
+及脚本回调，因为前瞻不得执行游戏代码；因此 `onScenarioLoad` 动态生成的场景属于
+明确的平台边界，扫描失败会安全跳过，真实执行仍保留原始路径。
 
 诊断开关由页面在 glue 注入前写入 `Module._webPrefetchEnabled` 与
 `Module._webPrefetchTrace`。C++ 只读取这两个平台槽位；`?prefetch=0` 仅绕过
 后置的 Web 前瞻，`sub_561F3C` 仍先完整执行且返回值不变。追踪输出扫描窗口、
-静态候选、二进制流字节数/耗时，并在关键事件采样 `VLFS.stats()`。
+静态候选、控制流目标、二进制流字节数/耗时，并在关键事件采样 `VLFS.stats()`。
+最近 200 条也保存在 `window.__KRKR2_PREFETCH_LOGS__`；控制台保持 `console.log`
+而非 `console.warn`，避免 DevTools 附加的异步调用栈干扰长帧诊断。
