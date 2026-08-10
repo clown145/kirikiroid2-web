@@ -376,11 +376,17 @@ namespace {
             TVPWebPrefetchWriteTrace(message.c_str(), includeStats ? 1 : 0);
     }
 
+    struct tTVPWebPrefetchAttribute {
+        ttstr Name;
+        ttstr Value;
+        bool Dynamic = false;
+    };
+
     struct tTVPWebPrefetchTag {
         ttstr Name;
         ttstr Storage;
         ttstr Target;
-        std::vector<ttstr> Attributes;
+        std::vector<tTVPWebPrefetchAttribute> Attributes;
         bool HasStorage = false;
         bool DynamicStorage = false;
         bool HasTarget = false;
@@ -508,10 +514,6 @@ namespace {
                 continue;
             }
 
-            if(tag.Attributes.size() < 16)
-                tag.Attributes.emplace_back(
-                    text + keyStart, keyLength);
-
             ++pos;
             while(pos < length && TVPWebPrefetchIsSpace(text[pos]))
                 ++pos;
@@ -540,23 +542,30 @@ namespace {
             if(quote && pos < length)
                 ++pos;
 
+            const bool dynamic = valueLength > 0 &&
+                (text[valueStart] == TJS_W('&') ||
+                 text[valueStart] == TJS_W('%'));
+            const ttstr value = TVPWebPrefetchUnescape(
+                text + valueStart, valueLength);
+            if(tag.Attributes.size() < 16) {
+                tag.Attributes.push_back({
+                    ttstr(text + keyStart, keyLength), value, dynamic
+                });
+            }
+
             if(TVPWebPrefetchSpanEqualsAscii(text + keyStart, keyLength,
                                              "storage")) {
                 tag.HasStorage = valueLength > 0;
                 if(tag.HasStorage) {
-                    tag.DynamicStorage = text[valueStart] == TJS_W('&') ||
-                        text[valueStart] == TJS_W('%');
-                    tag.Storage = TVPWebPrefetchUnescape(
-                        text + valueStart, valueLength);
+                    tag.DynamicStorage = dynamic;
+                    tag.Storage = value;
                 }
             } else if(TVPWebPrefetchSpanEqualsAscii(
                           text + keyStart, keyLength, "target")) {
                 tag.HasTarget = valueLength > 0;
                 if(tag.HasTarget) {
-                    tag.DynamicTarget = text[valueStart] == TJS_W('&') ||
-                        text[valueStart] == TJS_W('%');
-                    tag.Target = TVPWebPrefetchUnescape(
-                        text + valueStart, valueLength);
+                    tag.DynamicTarget = dynamic;
+                    tag.Target = value;
                 }
             }
         }
@@ -571,7 +580,7 @@ namespace {
         for(size_t i = 0; i < tag.Attributes.size(); ++i) {
             if(i)
                 shape += ",";
-            shape += TVPKAGTraceNarrow(tag.Attributes[i]);
+            shape += TVPKAGTraceNarrow(tag.Attributes[i].Name);
         }
         shape += ")";
         return shape;
@@ -613,17 +622,44 @@ namespace {
         return false;
     }
 
+    bool TVPWebPrefetchStartsWithAscii(const ttstr &name,
+                                       const char *prefix) {
+        const tjs_char *text = name.c_str();
+        size_t i = 0;
+        while(prefix[i]) {
+            if(!text[i] || TVPWebPrefetchLowerAscii(text[i]) !=
+                               static_cast<tjs_char>(prefix[i]))
+                return false;
+            ++i;
+        }
+        return true;
+    }
+
     enum class tTVPWebPrefetchKind { None, Graphic, Binary };
 
-    tTVPWebPrefetchKind TVPClassifyWebPrefetchStorage(
-        const tTVPWebPrefetchTag &tag) {
+    // 游戏宏常把真正的 storage 改名为 fn/voice，且资源名通常没有扩展名。
+    // 先按宏/标签语义分类，再用扩展名兜底，避免把所有 fn 都当成资源。
+    tTVPWebPrefetchKind TVPClassifyWebPrefetchTagName(const ttstr &name) {
         static const char *const graphicTags[] = {
             "image", "bg", "cg", "stand", "sprite", "face", "chara"
         };
         static const char *const binaryTags[] = {
             "playse", "playbgm", "playvoice", "voice", "vo", "wv",
-            "sound", "se", "bgm"
+            "sound", "se", "bgm", "pv", "splaybgm"
         };
+
+        if(TVPWebPrefetchNameIn(name, graphicTags,
+                                sizeof(graphicTags) / sizeof(graphicTags[0])) ||
+           TVPWebPrefetchStartsWithAscii(name, "haikei") ||
+           TVPWebPrefetchStartsWithAscii(name, "chara"))
+            return tTVPWebPrefetchKind::Graphic;
+        if(TVPWebPrefetchNameIn(name, binaryTags,
+                                sizeof(binaryTags) / sizeof(binaryTags[0])))
+            return tTVPWebPrefetchKind::Binary;
+        return tTVPWebPrefetchKind::None;
+    }
+
+    tTVPWebPrefetchKind TVPClassifyWebPrefetchValue(const ttstr &value) {
         static const char *const graphicExts[] = {
             ".png", ".jpg", ".jpeg", ".bmp", ".tlg", ".webp",
             ".jxr", ".pvr", ".bpg"
@@ -633,14 +669,7 @@ namespace {
             ".flac", ".mid", ".midi"
         };
 
-        if(TVPWebPrefetchNameIn(tag.Name, graphicTags,
-                                sizeof(graphicTags) / sizeof(graphicTags[0])))
-            return tTVPWebPrefetchKind::Graphic;
-        if(TVPWebPrefetchNameIn(tag.Name, binaryTags,
-                                sizeof(binaryTags) / sizeof(binaryTags[0])))
-            return tTVPWebPrefetchKind::Binary;
-
-        std::string storage = TVPKAGTraceLower(tag.Storage.AsStdString());
+        std::string storage = TVPKAGTraceLower(value.AsStdString());
         for(const char *ext : graphicExts) {
             if(storage.size() >= std::strlen(ext) &&
                storage.compare(storage.size() - std::strlen(ext),
@@ -654,6 +683,25 @@ namespace {
                 return tTVPWebPrefetchKind::Binary;
         }
         return tTVPWebPrefetchKind::None;
+    }
+
+    tTVPWebPrefetchKind TVPClassifyWebPrefetchAttribute(
+        const tTVPWebPrefetchTag &tag,
+        const tTVPWebPrefetchAttribute &attribute) {
+        if(TVPWebPrefetchEqualsAscii(attribute.Name, "graphic"))
+            return tTVPWebPrefetchKind::Graphic;
+        if(TVPWebPrefetchEqualsAscii(attribute.Name, "clickse") ||
+           TVPWebPrefetchEqualsAscii(attribute.Name, "enterse") ||
+           TVPWebPrefetchEqualsAscii(attribute.Name, "voice"))
+            return tTVPWebPrefetchKind::Binary;
+        if(!TVPWebPrefetchEqualsAscii(attribute.Name, "storage") &&
+           !TVPWebPrefetchEqualsAscii(attribute.Name, "fn"))
+            return tTVPWebPrefetchKind::None;
+
+        const tTVPWebPrefetchKind tagKind =
+            TVPClassifyWebPrefetchTagName(tag.Name);
+        return tagKind != tTVPWebPrefetchKind::None
+            ? tagKind : TVPClassifyWebPrefetchValue(attribute.Value);
     }
 
     bool TVPWebPrefetchIsWaitTag(const ttstr &name) {
@@ -888,29 +936,38 @@ namespace {
             const std::string shape = TVPWebPrefetchTagShape(tag);
             result.TagShapes.insert(shape);
 
-            if(tag.HasStorage && !tag.DynamicStorage) {
-                switch(TVPClassifyWebPrefetchStorage(tag)) {
+            for(const tTVPWebPrefetchAttribute &attribute : tag.Attributes) {
+                const tTVPWebPrefetchKind kind =
+                    TVPClassifyWebPrefetchAttribute(tag, attribute);
+                if(kind == tTVPWebPrefetchKind::None ||
+                   attribute.Value.IsEmpty())
+                    continue;
+                if(attribute.Dynamic) {
+                    ++result.DynamicSkipped;
+                    TVPWebPrefetchTrace(
+                        "dynamic-skip scenario='" +
+                        TVPKAGTraceNarrow(storage) + "' line=" +
+                        std::to_string(lineIndex) + " tag='" +
+                        TVPKAGTraceNarrow(tag.Name) + "' attribute='" +
+                        TVPKAGTraceNarrow(attribute.Name) + "' value='" +
+                        TVPKAGTraceNarrow(attribute.Value) + "'");
+                    continue;
+                }
+
+                switch(kind) {
                     case tTVPWebPrefetchKind::Graphic:
                         if(TVPQueueWebGraphicPrefetch(
-                               tag.Storage, storage, lineIndex))
+                               attribute.Value, storage, lineIndex))
                             ++result.GraphicsQueued;
                         break;
                     case tTVPWebPrefetchKind::Binary:
                         if(TVPQueueWebBinaryPrefetch(
-                               tag.Storage, tag.Name, storage, lineIndex))
+                               attribute.Value, tag.Name, storage, lineIndex))
                             ++result.BinaryQueued;
                         break;
                     case tTVPWebPrefetchKind::None:
                         break;
                 }
-            } else if(tag.HasStorage && tag.DynamicStorage) {
-                ++result.DynamicSkipped;
-                TVPWebPrefetchTrace(
-                    "dynamic-skip scenario='" +
-                    TVPKAGTraceNarrow(storage) + "' line=" +
-                    std::to_string(lineIndex) + " tag='" +
-                    TVPKAGTraceNarrow(tag.Name) + "' storage='" +
-                    TVPKAGTraceNarrow(tag.Storage) + "'");
             }
 
             if(TVPWebPrefetchIsWaitTag(tag.Name))
