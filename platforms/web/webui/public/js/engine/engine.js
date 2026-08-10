@@ -132,6 +132,24 @@
         return Module;
     }
 
+    // 诊断模式由用户显式开启。C++ 平台桥输出的是 console.log；部分浏览器
+    // 默认隐藏 Info，导致用户只看见 [PLUGIN-LINK] 等 warning。仅在诊断模式
+    // 下把 [prefetch] 前缀提升为 warning，其余 console.log 原样转发。
+    function exposePrefetchTrace() {
+        if (console.log && console.log.__krkr2PrefetchTraceBridge) return;
+        var originalLog = console.log;
+        function bridgedLog() {
+            if (typeof arguments[0] === 'string' &&
+                arguments[0].indexOf('[prefetch]') === 0) {
+                console.warn.apply(console, arguments);
+                return;
+            }
+            originalLog.apply(console, arguments);
+        }
+        bridgedLog.__krkr2PrefetchTraceBridge = true;
+        console.log = bridgedLog;
+    }
+
     // ---------------------------------------------------------------
     // 游戏源就绪 → 恢复存档 → 释放 user-file 依赖，引擎随即进入 main()
     // ---------------------------------------------------------------
@@ -195,8 +213,9 @@
             window.Module = Module;
 
             if (Module._webPrefetchTrace) {
-                console.log('[prefetch] config enabled=' +
-                            Module._webPrefetchEnabled);
+                exposePrefetchTrace();
+                console.warn('[prefetch] config enabled=' +
+                             Module._webPrefetchEnabled);
             }
 
             Module.setStatus('Downloading engine...');

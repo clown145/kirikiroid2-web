@@ -6,7 +6,9 @@ import { useFullscreen } from './useFullscreen.js';
 import { attachSaveSpace } from './saveSpace.js';
 import EdgeToolbar from './EdgeToolbar.vue';
 import SaveSpacePanel from './SaveSpacePanel.vue';
+import PrefetchSettingsPanel from './PrefetchSettingsPanel.vue';
 import LocalPicker from './LocalPicker.vue';
+import { loadPrefetchSettings, savePrefetchSettings } from './prefetchSettings.js';
 
 const container = ref(null);
 const canvas = ref(null);
@@ -14,6 +16,7 @@ const canvas = ref(null);
 const game = ref(null);
 const fatal = ref(null);          // 取游戏元数据阶段的错误
 const showSaves = ref(false);
+const showPrefetchSettings = ref(false);
 const xp3Choices = ref(null);     // 多 xp3 时的候选列表
 let xp3Resolve = null;
 
@@ -21,6 +24,14 @@ const { phase, statusText, progress, errorInfo, boot, loadSource } = useEngine()
 const { isFullscreen, toggle: toggleFullscreen, available: fullscreenAvailable } =
     useFullscreen(container);
 const pageParams = new URLSearchParams(location.search);
+const storedPrefetchSettings = loadPrefetchSettings();
+// 查询参数只保留给 coi-server 等开发入口；游戏库/PWA 的正常入口由工具栏设置。
+const prefetchEnabled = pageParams.has('prefetch')
+    ? pageParams.get('prefetch') !== '0'
+    : storedPrefetchSettings.enabled;
+const prefetchTrace = pageParams.has('prefetchTrace')
+    ? pageParams.get('prefetchTrace') === '1'
+    : storedPrefetchSettings.trace;
 
 // /play/local 是"打开本地文件"入口，不对应任何库里的条目
 const gameId = decodeURIComponent(location.pathname.replace(/^\/play\/?/, ''));
@@ -59,6 +70,22 @@ function exitToGallery() {
     // 整页跳转，不是路由切换：引擎是硬单例，必须靠 Document 销毁
     // 才能释放 Web Lock 和 wasm runtime。
     location.href = '/';
+}
+
+function applyPrefetchSettings(value) {
+    try {
+        savePrefetchSettings(value);
+    } catch (err) {
+        window.alert(`保存预加载设置失败：${err.message || err}`);
+        return;
+    }
+
+    // 引擎是硬单例，Module 槽位只在 boot 前读取。去掉开发参数，避免它们
+    // 覆盖刚保存的产品设置，然后整页替换以销毁当前 wasm runtime。
+    const url = new URL(location.href);
+    url.searchParams.delete('prefetch');
+    url.searchParams.delete('prefetchTrace');
+    location.replace(url.href);
 }
 
 // --- canvas 尺寸跟随容器 + devicePixelRatio ---------------------------
@@ -143,9 +170,6 @@ onMounted(async () => {
     }
 
     const renderer = window.KrKr2FS.normalizeRenderer(pageParams.get('renderer'));
-    const prefetchEnabled = pageParams.get('prefetch') !== '0';
-    const prefetchTrace = pageParams.get('prefetchTrace') === '1';
-
     // 引擎脚本必须用绝对地址：当前页在 /play/<id>，
     // 相对的 'index.js' 会解析成 /play/index.js 而 404。
     //
@@ -250,7 +274,8 @@ onUnmounted(() => {
             :fullscreen-available="fullscreenAvailable"
             @exit="exitToGallery"
             @toggle-fullscreen="toggleFullscreen"
-            @open-saves="showSaves = true" />
+            @open-saves="showSaves = true"
+            @open-prefetch-settings="showPrefetchSettings = true" />
 
         <!-- 加载浮层：仅在引擎未跑起来时存在，跑起来后彻底移除，不留任何遮挡 -->
         <div v-if="busy" class="overlay">
@@ -287,6 +312,12 @@ onUnmounted(() => {
         </div>
 
         <SaveSpacePanel v-if="showSaves" @close="showSaves = false" />
+        <PrefetchSettingsPanel
+            v-if="showPrefetchSettings"
+            :enabled="prefetchEnabled"
+            :trace="prefetchTrace"
+            @close="showPrefetchSettings = false"
+            @apply="applyPrefetchSettings" />
 
         <!-- 致命错误 -->
         <div v-if="errorInfo || fatal" class="modal-backdrop">

@@ -171,7 +171,8 @@ await visit('/play/local?prefetch=0&prefetchTrace=1', {
             'prefetch=0 关闭资源前瞻': hasEngine.prefetchEnabled === false,
             'prefetchTrace=1 开启诊断': hasEngine.prefetchTrace === true,
             '跨源隔离生效(SharedArrayBuffer 可用)': hasEngine.crossOriginIsolated === true,
-            '显示本地文件选择器': !!(await page.$('.drop'))
+            '显示本地文件选择器': !!(await page.$('.drop')),
+            '工具栏提供预加载设置': !!(await page.$('button[title="资源预加载设置"]'))
         };
     }
 });
