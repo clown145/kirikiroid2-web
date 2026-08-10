@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -67,6 +68,25 @@ EM_JS(void, TVPWebPrefetchWriteTrace,
           if(records.length > 200)
               records.splice(0, records.length - 200);
           console.log(line);
+      });
+
+// emscripten_async_call 通过普通 wasm table 回调进入 C++，不具备 JSPI 的
+// promising 上下文；回调内首次 VLFS 未命中会直接抛 SuspendError。前瞻任务
+// 单独经 promising 包装，允许其在不阻塞浏览器事件循环的情况下等待异步读。
+EM_JS(void, TVPWebPrefetchSchedule,
+      (uintptr_t callback, void *arg, int delayMs), {
+          var wrappers = globalThis.__KRKR2_PREFETCH_CALLBACKS__ ||
+              (globalThis.__KRKR2_PREFETCH_CALLBACKS__ = new Map());
+          var wrapped = wrappers.get(callback);
+          if(!wrapped) {
+              wrapped = WebAssembly.promising(wasmTable.get(callback));
+              wrappers.set(callback, wrapped);
+          }
+          setTimeout(function() {
+              wrapped(arg).catch(function(error) {
+                  console.error('[prefetch] callback failed:', error);
+              });
+          }, Math.max(0, delayMs));
       });
 #endif
 
@@ -360,6 +380,7 @@ namespace {
         ttstr Name;
         ttstr Storage;
         ttstr Target;
+        std::vector<ttstr> Attributes;
         bool HasStorage = false;
         bool DynamicStorage = false;
         bool HasTarget = false;
@@ -379,6 +400,7 @@ namespace {
         size_t BinaryQueued = 0;
         size_t DynamicSkipped = 0;
         size_t ControlsQueued = 0;
+        std::set<std::string> TagShapes;
         std::string StopReason;
     };
 
@@ -486,6 +508,10 @@ namespace {
                 continue;
             }
 
+            if(tag.Attributes.size() < 16)
+                tag.Attributes.emplace_back(
+                    text + keyStart, keyLength);
+
             ++pos;
             while(pos < length && TVPWebPrefetchIsSpace(text[pos]))
                 ++pos;
@@ -535,6 +561,47 @@ namespace {
             }
         }
         return true;
+    }
+
+    std::string TVPWebPrefetchTagShape(const tTVPWebPrefetchTag &tag) {
+        std::string shape = TVPKAGTraceNarrow(tag.Name);
+        if(tag.Attributes.empty())
+            return shape;
+        shape += "(";
+        for(size_t i = 0; i < tag.Attributes.size(); ++i) {
+            if(i)
+                shape += ",";
+            shape += TVPKAGTraceNarrow(tag.Attributes[i]);
+        }
+        shape += ")";
+        return shape;
+    }
+
+    std::string TVPWebPrefetchFormatTagShapes(
+        const tTVPWebScenarioScanResult &result) {
+        std::string shapes;
+        size_t emitted = 0;
+        for(const std::string &shape : result.TagShapes) {
+            if(emitted >= 32)
+                break;
+            if(!shapes.empty())
+                shapes += ",";
+            shapes += shape;
+            ++emitted;
+        }
+        if(result.TagShapes.size() > emitted) {
+            if(!shapes.empty())
+                shapes += ",";
+            shapes += "+" +
+                std::to_string(result.TagShapes.size() - emitted);
+        }
+        return shapes;
+    }
+
+    void TVPWebPrefetchScheduleTask(void (*callback)(void *), void *arg) {
+        TVPWebPrefetchSchedule(
+            reinterpret_cast<uintptr_t>(callback), arg,
+            TVP_WEB_PREFETCH_YIELD_MS);
     }
 
     bool TVPWebPrefetchNameIn(const ttstr &name,
@@ -622,8 +689,7 @@ namespace {
                     "'",
                 true);
         }
-        emscripten_async_call(TVPProcessWebGraphicPrefetch, nullptr,
-                              TVP_WEB_PREFETCH_YIELD_MS);
+        TVPWebPrefetchScheduleTask(TVPProcessWebGraphicPrefetch, nullptr);
     }
 
     bool TVPQueueWebGraphicPrefetch(const ttstr &storage,
@@ -650,8 +716,7 @@ namespace {
             std::to_string(TVPWebGraphicPrefetchQueue.size()));
         if(!TVPWebGraphicPrefetchScheduled) {
             TVPWebGraphicPrefetchScheduled = true;
-            emscripten_async_call(TVPProcessWebGraphicPrefetch, nullptr,
-                                  TVP_WEB_PREFETCH_YIELD_MS);
+            TVPWebPrefetchScheduleTask(TVPProcessWebGraphicPrefetch, nullptr);
         }
         return true;
     }
@@ -714,8 +779,7 @@ namespace {
                 TVPFinishWebBinaryPrefetch("failed");
             }
         }
-        emscripten_async_call(TVPProcessWebBinaryPrefetch, nullptr,
-                              TVP_WEB_PREFETCH_YIELD_MS);
+        TVPWebPrefetchScheduleTask(TVPProcessWebBinaryPrefetch, nullptr);
     }
 
     bool TVPQueueWebBinaryPrefetch(const ttstr &storage,
@@ -744,8 +808,7 @@ namespace {
             std::to_string(TVPWebBinaryPrefetchQueue.size()));
         if(!TVPWebBinaryPrefetchScheduled) {
             TVPWebBinaryPrefetchScheduled = true;
-            emscripten_async_call(TVPProcessWebBinaryPrefetch, nullptr,
-                                  TVP_WEB_PREFETCH_YIELD_MS);
+            TVPWebPrefetchScheduleTask(TVPProcessWebBinaryPrefetch, nullptr);
         }
         return true;
     }
@@ -800,8 +863,7 @@ namespace {
             std::to_string(depth));
         if(!TVPWebScenarioPrefetchScheduled) {
             TVPWebScenarioPrefetchScheduled = true;
-            emscripten_async_call(TVPProcessWebScenarioPrefetch, nullptr,
-                                  TVP_WEB_PREFETCH_YIELD_MS);
+            TVPWebPrefetchScheduleTask(TVPProcessWebScenarioPrefetch, nullptr);
         }
         return true;
     }
@@ -823,6 +885,9 @@ namespace {
 
         auto acceptTag = [&](const tTVPWebPrefetchTag &tag,
                              tjs_int lineIndex) {
+            const std::string shape = TVPWebPrefetchTagShape(tag);
+            result.TagShapes.insert(shape);
+
             if(tag.HasStorage && !tag.DynamicStorage) {
                 switch(TVPClassifyWebPrefetchStorage(tag)) {
                     case tTVPWebPrefetchKind::Graphic:
@@ -1002,7 +1067,8 @@ namespace {
                         std::to_string(result.ControlsQueued) +
                         " dynamicSkipped=" +
                         std::to_string(result.DynamicSkipped) + " stop=" +
-                        result.StopReason,
+                        result.StopReason + " tags='" +
+                        TVPWebPrefetchFormatTagShapes(result) + "'",
                     true);
                 scenario->Release();
                 scenario = nullptr;
@@ -1016,8 +1082,7 @@ namespace {
                 TVPKAGTraceNarrow(task.Target) + "'");
         }
 
-        emscripten_async_call(TVPProcessWebScenarioPrefetch, nullptr,
-                              TVP_WEB_PREFETCH_YIELD_MS);
+        TVPWebPrefetchScheduleTask(TVPProcessWebScenarioPrefetch, nullptr);
     }
 }
 #endif
@@ -3484,7 +3549,8 @@ void tTJSNI_KAGParser::QueueWebScenarioPrefetch() {
             std::to_string(result.BinaryQueued) + " controls=" +
             std::to_string(result.ControlsQueued) + " dynamicSkipped=" +
             std::to_string(result.DynamicSkipped) + " stop=" +
-            result.StopReason,
+            result.StopReason + " tags='" +
+            TVPWebPrefetchFormatTagShapes(result) + "'",
         true);
 }
 #endif

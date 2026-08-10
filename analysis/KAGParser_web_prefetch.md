@@ -51,9 +51,18 @@ return TJS_S_OK;
 及脚本回调，因为前瞻不得执行游戏代码；因此 `onScenarioLoad` 动态生成的场景属于
 明确的平台边界，扫描失败会安全跳过，真实执行仍保留原始路径。
 
+普通 `emscripten_async_call` 的 wasm table 回调不是 JSPI promising 入口。运行日志
+已证明：跨场景任务读取未缓存的 `scenario_1_1.ks` 时会抛
+`SuspendError: trying to suspend without WebAssembly.promising`。前瞻调度因此改为
+`WebAssembly.promising(wasmTable.get(callback))` 后再由定时器调用；场景、图片、
+二进制三类前瞻共用此入口。这个包装只赋予 Web 平台回调合法的 VLFS 挂起能力，
+不改变 `sub_561F3C` 或真实 KAG parser 的调用链。
+
 诊断开关由页面在 glue 注入前写入 `Module._webPrefetchEnabled` 与
 `Module._webPrefetchTrace`。C++ 只读取这两个平台槽位；`?prefetch=0` 仅绕过
 后置的 Web 前瞻，`sub_561F3C` 仍先完整执行且返回值不变。追踪输出扫描窗口、
 静态候选、控制流目标、二进制流字节数/耗时，并在关键事件采样 `VLFS.stats()`。
 最近 200 条也保存在 `window.__KRKR2_PREFETCH_LOGS__`；控制台保持 `console.log`
 而非 `console.warn`，避免 DevTools 附加的异步调用栈干扰长帧诊断。
+扫描汇总还会输出去重后的 `tag(attribute,...)` 形状（不包含属性值或对白），用于
+识别游戏通过自定义宏间接引用资源时现有分类器遗漏的具体标签。
