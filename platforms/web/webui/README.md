@@ -211,8 +211,8 @@ R2 里是扁平 key（`index.wasm`、`index.js`……），每次构建覆盖 �
 于是引擎换版**不需要重新部署页面**，下次访问自动跟上；代价只有那个几百字节的
 版本指针每次要回源校验一次，换掉了给 22 MB 做条件请求的开销。
 
-> SW 侧对版本指针走 stale-while-revalidate（先给缓存再后台更新），
-> 否则播放页离线不可用 —— 它靠这个文件启动。见 `scripts/gen-sw.js`。
+> SW 侧对版本指针走 network-first：在线时立即使用最新版并更新离线副本，
+> 只有网络失败时才回退缓存。见 `scripts/gen-sw.js`。
 
 `build-web.yml` 会在引擎构建后自动上传。需要仓库配 `CLOUDFLARE_API_TOKEN` 与
 `CLOUDFLARE_ACCOUNT_ID`，桶名用仓库变量 `R2_ENGINE_BUCKET` 覆盖

@@ -17,6 +17,14 @@
   先经 `sub_5614B0 @ 0x5614B0` 保存返回位置。对应调用点分别为
   `0x566AAC/0x566ACC`、`0x566BD4/0x566BE8`、`0x566E24/0x566E3C` 与
   `0x567B08/0x567B1C`；call 的压栈调用点是 `0x567AF4`。
+- `sub_8FDA9C @ 0x8FDA9C` 是 XP3 stream `Read`：先调用
+  `EnsureSegment@0x8FD204`，再按 segment 逐块读取；压缩段从解压缓存复制，未压缩
+  段从底层 stream 读取，之后执行 extraction filter，并按顺序更新 segment/file
+  游标。Web `ReadAsync` 保留相同顺序，只在底层存储 I/O 处拆成续体。
+- `TVPTouchImages@0x7F311C` 由 `System.touchImages` 包装
+  `sub_8F25B4@0x8F25B4` 调用；它先检查图像缓存开关和容量，再按 storage 顺序填充
+  图像缓存。Web 端现有图片线程是避免主线程同步解码的平台边界，完成日志只观察
+  最终缓存状态，不改变加载顺序。
 
 伪代码（保留原始分支含义）：
 
@@ -45,9 +53,11 @@ return TJS_S_OK;
 终止当前前瞻分支。场景队列限制为 64 个任务、深度为 8，并对 `(storage,target)`
 去重防环；失败只丢弃该预载分支，绝不影响真实 KAG 执行。
 
-图片经单项异步 `TVPTouchImages` 派发，语音/BGM 经 `TVPCreateStream` 按 256 KiB
-小步读取。三类队列的后继任务都至少让出 8 ms；这使预载下载和图片入队不会在一
-次剧情推进中批量执行。`TVPGetScenario(..., false)` 有意不调用真实 `LoadScenario`
+图片经单项异步 `TVPTouchImages` 派发，并在图片线程回到主线程、确认图像缓存命中
+后记录 `graphic-done`。语音/BGM 经 `TVPCreateStream`，再通过 `ReadAsync()` /
+`EnsureSegmentAsync()` 按 256 KiB 小步读取；完成回调从 stream I/O executor 投递回
+应用主线程后才更新队列。三类队列的后继任务都至少让出 8 ms；这使预载下载和图片
+入队不会在一次剧情推进中批量执行。`TVPGetScenario(..., false)` 有意不调用真实 `LoadScenario`
 及脚本回调，因为前瞻不得执行游戏代码；因此 `onScenarioLoad` 动态生成的场景属于
 明确的平台边界，扫描失败会安全跳过，真实执行仍保留原始路径。
 
@@ -55,8 +65,9 @@ return TJS_S_OK;
 已证明：跨场景任务读取未缓存的 `scenario_1_1.ks` 时会抛
 `SuspendError: trying to suspend without WebAssembly.promising`。前瞻调度因此改为
 `WebAssembly.promising(wasmTable.get(callback))` 后再由定时器调用；场景、图片、
-二进制三类前瞻共用此入口。这个包装只赋予 Web 平台回调合法的 VLFS 挂起能力，
-不改变 `sub_561F3C` 或真实 KAG parser 的调用链。
+二进制三类前瞻共用此调度入口。二进制任务不再从 promising 包装内同步 `Read()`
+并跨 Promise 保留 C++ 栈，而是使用已有续体式异步流 API；这个平台适配不改变
+`sub_561F3C` 或真实 KAG parser 的调用链。
 
 诊断开关由页面在 glue 注入前写入 `Module._webPrefetchEnabled` 与
 `Module._webPrefetchTrace`。C++ 只读取这两个平台槽位；`?prefetch=0` 仅绕过
