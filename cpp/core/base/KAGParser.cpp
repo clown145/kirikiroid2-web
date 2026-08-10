@@ -98,6 +98,7 @@ namespace TJS {
 
 #ifdef EMSCRIPTEN
 tTVPScenarioCacheItem *TVPGetScenario(const ttstr &storagename, bool isstring);
+tTVPGraphicHandlerType *TVPGuessGraphicLoadHandler(ttstr &name);
 #endif
 
 //---------------------------------------------------------------------------
@@ -419,18 +420,28 @@ namespace {
     std::set<ttstr> TVPWebGraphicPrefetchSeen;
     std::set<std::pair<ttstr, ttstr>> TVPWebScenarioPrefetchSeen;
 
-    struct tTVPWebBinaryPrefetchTask {
-        ttstr Name;
+    enum class tTVPWebStreamPrefetchKind { Graphic, Binary };
+
+    struct tTVPWebStreamPrefetchTask {
+        ttstr RequestedName;
+        ttstr ResolvedName;
+        tTVPWebStreamPrefetchKind Kind;
         std::unique_ptr<tTJSBinaryStream> Stream;
         std::vector<tjs_uint8> Buffer;
         tjs_uint64 BytesRead = 0;
         double StartedAt = 0;
 
-        explicit tTVPWebBinaryPrefetchTask(const ttstr &name) :
-            Name(name), Buffer(TVP_WEB_PREFETCH_READ_SIZE) {}
+        tTVPWebStreamPrefetchTask(const ttstr &name,
+                                  tTVPWebStreamPrefetchKind kind) :
+            RequestedName(name), ResolvedName(name), Kind(kind),
+            Buffer(TVP_WEB_PREFETCH_READ_SIZE) {}
     };
 
-    std::shared_ptr<tTVPWebBinaryPrefetchTask> TVPWebBinaryPrefetchTask;
+    using tTVPWebStreamPrefetchTaskPtr =
+        std::shared_ptr<tTVPWebStreamPrefetchTask>;
+
+    tTVPWebStreamPrefetchTaskPtr TVPWebGraphicPrefetchTask;
+    tTVPWebStreamPrefetchTaskPtr TVPWebBinaryPrefetchTask;
     bool TVPWebGraphicPrefetchScheduled = false;
     bool TVPWebBinaryPrefetchScheduled = false;
     bool TVPWebScenarioPrefetchScheduled = false;
@@ -714,32 +725,62 @@ namespace {
             name, waits, sizeof(waits) / sizeof(waits[0]));
     }
 
-    void TVPProcessWebGraphicPrefetch(void *) {
-        if(TVPWebGraphicPrefetchQueue.empty()) {
-            TVPWebGraphicPrefetchScheduled = false;
-            return;
+    void TVPProcessWebGraphicPrefetch(void *);
+    void TVPProcessWebBinaryPrefetch(void *);
+
+    const char *TVPWebStreamPrefetchName(tTVPWebStreamPrefetchKind kind) {
+        return kind == tTVPWebStreamPrefetchKind::Graphic ? "graphic"
+                                                          : "binary";
+    }
+
+    std::deque<ttstr> &
+    TVPWebStreamPrefetchQueue(tTVPWebStreamPrefetchKind kind) {
+        return kind == tTVPWebStreamPrefetchKind::Graphic
+            ? TVPWebGraphicPrefetchQueue
+            : TVPWebBinaryPrefetchQueue;
+    }
+
+    tTVPWebStreamPrefetchTaskPtr &
+    TVPWebStreamPrefetchActiveTask(tTVPWebStreamPrefetchKind kind) {
+        return kind == tTVPWebStreamPrefetchKind::Graphic
+            ? TVPWebGraphicPrefetchTask
+            : TVPWebBinaryPrefetchTask;
+    }
+
+    bool &TVPWebStreamPrefetchScheduled(tTVPWebStreamPrefetchKind kind) {
+        return kind == tTVPWebStreamPrefetchKind::Graphic
+            ? TVPWebGraphicPrefetchScheduled
+            : TVPWebBinaryPrefetchScheduled;
+    }
+
+    void (*TVPWebStreamPrefetchProcessor(tTVPWebStreamPrefetchKind kind))(
+        void *) {
+        return kind == tTVPWebStreamPrefetchKind::Graphic
+            ? TVPProcessWebGraphicPrefetch
+            : TVPProcessWebBinaryPrefetch;
+    }
+
+    bool TVPResolveWebStreamPrefetchStorage(tTVPWebStreamPrefetchTask &task) {
+        if(!TVPExtractStorageExt(task.RequestedName).IsEmpty())
+            return true;
+
+        if(task.Kind == tTVPWebStreamPrefetchKind::Graphic) {
+            return TVPGuessGraphicLoadHandler(task.ResolvedName) != nullptr;
         }
 
-        const ttstr storage = TVPWebGraphicPrefetchQueue.front();
-        TVPWebGraphicPrefetchQueue.pop_front();
-        TVPWebPrefetchTrace(
-            "graphic-start storage='" + TVPKAGTraceNarrow(storage) +
-                "' remaining=" +
-                std::to_string(TVPWebGraphicPrefetchQueue.size()),
-            true);
-        try {
-            TVPTouchImages(std::vector<ttstr>{storage}, 0, 0);
-            TVPWebPrefetchTrace(
-                "graphic-dispatched storage='" +
-                    TVPKAGTraceNarrow(storage) + "'",
-                true);
-        } catch(...) {
-            TVPWebPrefetchTrace(
-                "graphic-failed storage='" + TVPKAGTraceNarrow(storage) +
-                    "'",
-                true);
+        static const tjs_char *const extensions[] = {
+            TJS_W(".ogg"),  TJS_W(".wav"), TJS_W(".mp3"),
+            TJS_W(".opus"), TJS_W(".m4a"), TJS_W(".aac"),
+            TJS_W(".flac"), TJS_W(".mid"), TJS_W(".midi")
+        };
+        for(const tjs_char *extension : extensions) {
+            ttstr candidate = task.RequestedName + extension;
+            if(TVPIsExistentStorage(candidate)) {
+                task.ResolvedName = candidate;
+                return true;
+            }
         }
-        TVPWebPrefetchScheduleTask(TVPProcessWebGraphicPrefetch, nullptr);
+        return false;
     }
 
     bool TVPQueueWebGraphicPrefetch(const ttstr &storage,
@@ -771,8 +812,6 @@ namespace {
         return true;
     }
 
-    void TVPProcessWebBinaryPrefetch(void *);
-
     std::string TVPWebPrefetchExceptionMessage(
         const std::exception_ptr &error) {
         if(!error)
@@ -786,97 +825,130 @@ namespace {
         }
     }
 
-    void TVPFinishWebBinaryPrefetch(const char *status,
+    void TVPFinishWebStreamPrefetch(tTVPWebStreamPrefetchKind kind,
+                                    const char *status,
                                     const std::string &detail = {}) {
-        if(!TVPWebBinaryPrefetchTask)
+        tTVPWebStreamPrefetchTaskPtr &active =
+            TVPWebStreamPrefetchActiveTask(kind);
+        if(!active)
             return;
-        const double elapsed = TVPWebBinaryPrefetchTask->StartedAt > 0
-            ? emscripten_get_now() - TVPWebBinaryPrefetchTask->StartedAt
+        const double elapsed = active->StartedAt > 0
+            ? emscripten_get_now() - active->StartedAt
             : 0;
+        const std::string resolved =
+            active->ResolvedName == active->RequestedName
+            ? std::string()
+            : " resolved='" + TVPKAGTraceNarrow(active->ResolvedName) + "'";
         TVPWebPrefetchTrace(
-            std::string("binary-") + status + " storage='" +
-                TVPKAGTraceNarrow(TVPWebBinaryPrefetchTask->Name) +
-                "' bytes=" +
-                std::to_string(TVPWebBinaryPrefetchTask->BytesRead) +
+            std::string(TVPWebStreamPrefetchName(kind)) + "-" + status +
+                " storage='" + TVPKAGTraceNarrow(active->RequestedName) + "'" +
+                resolved + " bytes=" + std::to_string(active->BytesRead) +
                 " elapsedMs=" + std::to_string(elapsed) +
                 (detail.empty() ? std::string() : " error='" + detail + "'"),
             true);
-        TVPWebBinaryPrefetchTask.reset();
+        active.reset();
     }
 
-    void TVPCompleteWebBinaryPrefetchRead(
-        const std::shared_ptr<tTVPWebBinaryPrefetchTask> &task,
-        tjs_uint read, const std::exception_ptr &error) {
+    void
+    TVPCompleteWebStreamPrefetchRead(const tTVPWebStreamPrefetchTaskPtr &task,
+                                     tjs_uint read,
+                                     const std::exception_ptr &error) {
         // ReadAsync completes on the stream I/O executor. Keep the prefetch
         // queues and task lifetime confined to the application thread.
         Application->PostUserMessage([task, read, error]() {
-            if(TVPWebBinaryPrefetchTask.get() != task.get())
+            tTVPWebStreamPrefetchTaskPtr &active =
+                TVPWebStreamPrefetchActiveTask(task->Kind);
+            if(active.get() != task.get())
                 return;
 
             if(error) {
-                TVPFinishWebBinaryPrefetch(
-                    "failed", TVPWebPrefetchExceptionMessage(error));
+                TVPFinishWebStreamPrefetch(
+                    task->Kind, "failed",
+                    TVPWebPrefetchExceptionMessage(error));
             } else {
                 task->BytesRead += read;
                 if(read == 0)
-                    TVPFinishWebBinaryPrefetch("done");
+                    TVPFinishWebStreamPrefetch(task->Kind, "done");
             }
-            TVPWebPrefetchScheduleTask(TVPProcessWebBinaryPrefetch, nullptr);
+            TVPWebPrefetchScheduleTask(
+                TVPWebStreamPrefetchProcessor(task->Kind), nullptr);
         });
     }
 
-    void TVPProcessWebBinaryPrefetch(void *) {
-        if(!TVPWebBinaryPrefetchTask) {
-            if(TVPWebBinaryPrefetchQueue.empty()) {
-                TVPWebBinaryPrefetchScheduled = false;
+    void TVPProcessWebStreamPrefetch(tTVPWebStreamPrefetchKind kind) {
+        tTVPWebStreamPrefetchTaskPtr &active =
+            TVPWebStreamPrefetchActiveTask(kind);
+        std::deque<ttstr> &queue = TVPWebStreamPrefetchQueue(kind);
+
+        if(!active) {
+            if(queue.empty()) {
+                TVPWebStreamPrefetchScheduled(kind) = false;
                 return;
             }
-            TVPWebBinaryPrefetchTask =
-                std::make_shared<tTVPWebBinaryPrefetchTask>(
-                    TVPWebBinaryPrefetchQueue.front());
-            TVPWebBinaryPrefetchQueue.pop_front();
-            TVPWebBinaryPrefetchTask->StartedAt = emscripten_get_now();
-            TVPWebPrefetchTrace(
-                "binary-start storage='" +
-                    TVPKAGTraceNarrow(TVPWebBinaryPrefetchTask->Name) +
-                    "' remaining=" +
-                    std::to_string(TVPWebBinaryPrefetchQueue.size()),
-                true);
+            active = std::make_shared<tTVPWebStreamPrefetchTask>(queue.front(),
+                                                                 kind);
+            queue.pop_front();
+            active->StartedAt = emscripten_get_now();
             try {
-                TVPWebBinaryPrefetchTask->Stream.reset(TVPCreateStream(
-                    TVPWebBinaryPrefetchTask->Name, TJS_BS_READ));
-                if(!TVPWebBinaryPrefetchTask->Stream)
-                    TVPFinishWebBinaryPrefetch("failed");
+                const bool resolved =
+                    TVPResolveWebStreamPrefetchStorage(*active);
+                TVPWebPrefetchTrace(
+                    std::string(TVPWebStreamPrefetchName(kind)) +
+                        "-start storage='" +
+                        TVPKAGTraceNarrow(active->RequestedName) + "'" +
+                        (active->ResolvedName == active->RequestedName
+                             ? std::string()
+                             : " resolved='" +
+                                 TVPKAGTraceNarrow(active->ResolvedName) +
+                                 "'") +
+                        " remaining=" + std::to_string(queue.size()),
+                    true);
+                if(!resolved) {
+                    TVPFinishWebStreamPrefetch(kind, "failed",
+                                               "Cannot resolve storage");
+                } else {
+                    active->Stream.reset(
+                        TVPCreateStream(active->ResolvedName, TJS_BS_READ));
+                    if(!active->Stream)
+                        TVPFinishWebStreamPrefetch(kind, "failed");
+                }
             } catch(...) {
-                TVPFinishWebBinaryPrefetch(
-                    "failed",
+                TVPFinishWebStreamPrefetch(
+                    kind, "failed",
                     TVPWebPrefetchExceptionMessage(std::current_exception()));
             }
         }
 
-        if(!TVPWebBinaryPrefetchTask ||
-           !TVPWebBinaryPrefetchTask->Stream) {
-            TVPWebPrefetchScheduleTask(TVPProcessWebBinaryPrefetch, nullptr);
+        if(!active || !active->Stream) {
+            TVPWebPrefetchScheduleTask(TVPWebStreamPrefetchProcessor(kind),
+                                       nullptr);
             return;
         }
 
-        const std::shared_ptr<tTVPWebBinaryPrefetchTask> task =
-            TVPWebBinaryPrefetchTask;
+        const tTVPWebStreamPrefetchTaskPtr task = active;
         try {
             task->Stream->ReadAsync(
-                task->Buffer.data(),
-                static_cast<tjs_uint>(task->Buffer.size()),
+                task->Buffer.data(), static_cast<tjs_uint>(task->Buffer.size()),
                 [task](tjs_uint read, std::exception_ptr error) {
-                    TVPCompleteWebBinaryPrefetchRead(task, read, error);
+                    TVPCompleteWebStreamPrefetchRead(task, read, error);
                 });
         } catch(...) {
             // 静态前瞻允许候选不存在；失败只表示该候选不适合预载，
             // 不能影响真实 KAG 执行，也不能阻塞队列里的后续候选。
-            TVPFinishWebBinaryPrefetch(
-                "failed",
+            TVPFinishWebStreamPrefetch(
+                kind, "failed",
                 TVPWebPrefetchExceptionMessage(std::current_exception()));
-            TVPWebPrefetchScheduleTask(TVPProcessWebBinaryPrefetch, nullptr);
+            TVPWebPrefetchScheduleTask(TVPWebStreamPrefetchProcessor(kind),
+                                       nullptr);
         }
+    }
+
+    void TVPProcessWebGraphicPrefetch(void *) {
+        TVPProcessWebStreamPrefetch(tTVPWebStreamPrefetchKind::Graphic);
+    }
+
+    void TVPProcessWebBinaryPrefetch(void *) {
+        TVPProcessWebStreamPrefetch(tTVPWebStreamPrefetchKind::Binary);
     }
 
     bool TVPQueueWebBinaryPrefetch(const ttstr &storage,
@@ -1192,13 +1264,6 @@ namespace {
     }
 }
 
-void TVPReportWebGraphicPrefetchResult(const ttstr &storage,
-                                       const char *status) {
-    TVPWebPrefetchTrace(
-        std::string("graphic-") + status + " storage='" +
-            TVPKAGTraceNarrow(storage) + "'",
-        true);
-}
 #endif
 
 //---------------------------------------------------------------------------

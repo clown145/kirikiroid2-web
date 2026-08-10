@@ -22,9 +22,9 @@
   段从底层 stream 读取，之后执行 extraction filter，并按顺序更新 segment/file
   游标。Web `ReadAsync` 保留相同顺序，只在底层存储 I/O 处拆成续体。
 - `TVPTouchImages@0x7F311C` 由 `System.touchImages` 包装
-  `sub_8F25B4@0x8F25B4` 调用；它先检查图像缓存开关和容量，再按 storage 顺序填充
-  图像缓存。Web 端现有图片线程是避免主线程同步解码的平台边界，完成日志只观察
-  最终缓存状态，不改变加载顺序。
+  `sub_8F25B4@0x8F25B4` 调用；它先检查图像缓存开关和容量，再按 storage 顺序创建
+  临时 Bitmap 并交给异步图片线程。图形扩展名建议链位于
+  `sub_7F1160@0x7F1160`。
 
 伪代码（保留原始分支含义）：
 
@@ -53,11 +53,19 @@ return TJS_S_OK;
 终止当前前瞻分支。场景队列限制为 64 个任务、深度为 8，并对 `(storage,target)`
 去重防环；失败只丢弃该预载分支，绝不影响真实 KAG 执行。
 
-图片经单项异步 `TVPTouchImages` 派发，并在图片线程回到主线程、确认图像缓存命中
-后记录 `graphic-done`。语音/BGM 经 `TVPCreateStream`，再通过 `ReadAsync()` /
+线上 `20260810214816` 引擎的实际运行证据显示：存档进入 `scenario_4_2.ks` 后一次
+扫描得到 14 个图形候选和 21 个音频候选；音频均能完成，而所有图形任务从启动阶段
+第一项起都只有 `graphic-dispatched`，没有任何完成回调。`TVPTouchImages` 的工作线程
+需要在 pthread 中同步解码并读取远程 XP3；VLFS 的远程未命中由 JavaScript Promise
+供数。Web 前瞻的目标只是提前下载并持久缓存这些字节，不需要提前解码位图，因此不再
+把前瞻候选交给该线程。原始 `TVPTouchImages` 路径保持不变，仅 Web 前瞻改为先按正常
+图形扩展名建议逻辑解析真实 storage，再经 `TVPCreateStream` + `ReadAsync()` 读到 EOF。
+
+图片和语音/BGM 各有一条独立异步读取队列，通过 `ReadAsync()` /
 `EnsureSegmentAsync()` 按 256 KiB 小步读取；完成回调从 stream I/O executor 投递回
-应用主线程后才更新队列。三类队列的后继任务都至少让出 8 ms；这使预载下载和图片
-入队不会在一次剧情推进中批量执行。`TVPGetScenario(..., false)` 有意不调用真实 `LoadScenario`
+应用主线程后才更新队列。无扩展名音频候选先按实际存在的常见音频扩展名解析，因此
+纸魔的 `BGM15`/`BGM20` 可以落到实际归档项。两条资源队列和场景队列的后继任务都
+至少让出 8 ms，下载不会在一次剧情推进中批量堵塞主线程。`TVPGetScenario(..., false)` 有意不调用真实 `LoadScenario`
 及脚本回调，因为前瞻不得执行游戏代码；因此 `onScenarioLoad` 动态生成的场景属于
 明确的平台边界，扫描失败会安全跳过，真实执行仍保留原始路径。
 

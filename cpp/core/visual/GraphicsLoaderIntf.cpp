@@ -38,11 +38,6 @@
 #include <complex>
 #include <list>
 
-#ifdef EMSCRIPTEN
-void TVPReportWebGraphicPrefetchResult(const ttstr &storage,
-                                       const char *status);
-#endif
-
 void TVPLoadPVRv3(void *formatdata, void *callbackdata,
                   tTVPGraphicSizeCallback sizecallback,
                   tTVPGraphicScanLineCallback scanlinecallback,
@@ -2187,31 +2182,16 @@ private:
 
 class tBitmapForAsyncTouch : public tTJSNI_Bitmap {
     typedef tTJSNI_Bitmap inherit;
-    ttstr Storage;
 
 public:
-    explicit tBitmapForAsyncTouch(const ttstr &storage) : Storage(storage) {
-        Construct(0, nullptr, nullptr);
-    }
+    tBitmapForAsyncTouch() { Construct(0, nullptr, nullptr); }
     void SetLoading(bool load) override {
         inherit::SetLoading(load);
         if(!load) {
-#ifdef EMSCRIPTEN
-            const ttstr storage = Storage;
-            ::Application->PostUserMessage([this, storage]() {
-                const bool cached = TVPHasImageCache(
-                    storage, glmNormal, 0, 0, TVP_clNone);
-                TVPReportWebGraphicPrefetchResult(
-                    storage, cached ? "done" : "failed");
-                Invalidate();
-                Destruct();
-            });
-#else
             ::Application->PostUserMessage([this]() {
                 Invalidate();
                 Destruct();
             });
-#endif
         }
     }
 };
@@ -2263,14 +2243,11 @@ void TVPTouchImages(const std::vector<ttstr> &storages, tjs_int64 limit,
                     TVPGraphicCache.FindAndTouchWithHash(searchdata, hash);
                 if(ptr) {
                     // found in cache
-#ifdef EMSCRIPTEN
-                    TVPReportWebGraphicPrefetchResult(nname, "cache-hit");
-#endif
                     continue;
                 }
             }
             Application->GetAsyncImageLoader()->PushLoadQueue(
-                nullptr, new tBitmapForAsyncTouch(nname), nname);
+                nullptr, new tBitmapForAsyncTouch(), nname);
         }
         return;
     }
