@@ -25,6 +25,10 @@ on:
 env:
   EMSDK_VERSION: "4.0.23"
   EM_CACHE: ${{ github.workspace }}/.emsdk/.emscripten_cache
+  VCPKG_BINARY_CACHE: ${{ github.workspace }}/.vcpkg-binary-cache
+  # run-vcpkg 默认的 x-gha 后端已被 vcpkg 移除。用 actions/cache
+  # 持久化文件后端，不依赖额外的 NuGet secret。
+  VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite
 
 jobs:
   build-web:
@@ -81,9 +85,17 @@ jobs:
         with:
           vcpkgDirectory: ${{ env.VCPKG_ROOT }}
           vcpkgGitCommitId: b1e15efef6758eaa0beb0a8732cfa66f6a68a81d
-          # 由 run-vcpkg 用固定提交和 manifest 生成工具缓存键，避免外层
-          # actions/cache 与它同时管理 .vcpkg、且遗漏 pinned commit。
+          # 这里只缓存 vcpkg 工具本身；编译后的包由下面的文件后端缓存。
           doNotCache: false
+
+      - name: Cache vcpkg binary packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_BINARY_CACHE }}
+          key: >-
+            vcpkg-binary-${{ runner.os }}-${{ runner.arch }}-emsdk-${{ env.EMSDK_VERSION }}-b1e15efef6758eaa0beb0a8732cfa66f6a68a81d-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg/ports/**', 'vcpkg/triplets/**') }}
+          restore-keys: |
+            vcpkg-binary-${{ runner.os }}-${{ runner.arch }}-emsdk-${{ env.EMSDK_VERSION }}-b1e15efef6758eaa0beb0a8732cfa66f6a68a81d-
 
       - name: Check NuGet API key
         run: |

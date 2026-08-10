@@ -1,6 +1,7 @@
 name: Differential Tests
 
 on:
+  # 依赖私有 reference 仓库和 Android/Frida oracle，只允许手动运行。
   workflow_dispatch:
     inputs:
       record_motion_playback_oracle:
@@ -11,20 +12,6 @@ on:
         description: "Upload motion_playback render-stage PNG files"
         type: boolean
         default: false
-  push:
-    branches:
-      - web
-      - 'dev/*'
-    # 这套差分要跑 wasmtime + Android(Frida) oracle，是仓库里最贵的 workflow。
-    # 前端和文档不可能影响 C++ 行为差分，别让它们触发。
-    paths-ignore:
-      - 'platforms/web/webui/**'
-      - '.github/workflows/build-webui.yml'
-      - 'analysis/**'
-      - 'doc/**'
-      - '**/*.md'
-      - 'coi-server.py'
-
 env:
   EMSDK_VERSION: "4.0.23"
   EM_CACHE: ${{ github.workspace }}/.emsdk/.emscripten_cache
