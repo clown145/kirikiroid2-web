@@ -9,8 +9,10 @@ const available = ref({ steam: true, github: false });
 const showLogin = ref(false);
 const showMenu = ref(false);
 const status = ref('');
+const avatarFailed = ref(false);
 
 const initial = computed(() => (user.value?.displayName || '?').trim().charAt(0).toUpperCase());
+const showAvatar = computed(() => !!user.value?.avatarUrl && !avatarFailed.value);
 const linked = (provider) => user.value?.providers?.includes(provider);
 
 const ERROR_MESSAGES = {
@@ -39,6 +41,7 @@ async function refreshAccount() {
     try {
         const result = await api.getAccount();
         user.value = result.user || null;
+        avatarFailed.value = false;
         available.value = result.availableProviders || available.value;
     } catch (err) {
         status.value = err.message || '无法读取登录状态';
@@ -114,7 +117,10 @@ onUnmounted(() => {
                 :aria-expanded="showMenu"
                 aria-haspopup="menu"
                 @click="showMenu = !showMenu">
-                <span class="account-avatar" aria-hidden="true">{{ initial }}</span>
+                <span class="account-avatar" aria-hidden="true">
+                    <img v-if="showAvatar" :src="user.avatarUrl" alt="" @error="avatarFailed = true">
+                    <template v-else>{{ initial }}</template>
+                </span>
                 <span class="account-name">{{ user.displayName }}</span>
                 <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14" aria-hidden="true">
                     <path d="m7 10 5 5 5-5z" />
@@ -123,7 +129,10 @@ onUnmounted(() => {
 
             <div v-if="showMenu" class="account-menu" role="menu">
                 <div class="account-summary">
-                    <span class="account-avatar large" aria-hidden="true">{{ initial }}</span>
+                    <span class="account-avatar large" aria-hidden="true">
+                        <img v-if="showAvatar" :src="user.avatarUrl" alt="" @error="avatarFailed = true">
+                        <template v-else>{{ initial }}</template>
+                    </span>
                     <span>
                         <strong>{{ user.displayName }}</strong>
                         <small>
@@ -239,8 +248,10 @@ onUnmounted(() => {
     color: var(--bg-0);
     font-size: 11px;
     font-weight: 700;
+    overflow: hidden;
 }
 
+.account-avatar img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .account-avatar.large { width: 34px; height: 34px; font-size: 13px; }
 
 .account-name {

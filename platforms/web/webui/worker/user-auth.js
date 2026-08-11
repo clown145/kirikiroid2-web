@@ -8,6 +8,7 @@ const USER_COOKIE = '__Host-krkr2_user';
 const OAUTH_COOKIE_PREFIX = '__Host-krkr2_oauth_';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const OAUTH_TTL_SECONDS = 10 * 60;
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -182,8 +183,24 @@ function rowToUser(row, providers = []) {
     return {
         id: row.id,
         displayName: row.display_name,
+        avatarUrl: row.avatar_url ? `/api/account/avatar?v=${row.updated_at}` : '',
         providers
     };
+}
+
+function trustedAvatarUrl(value) {
+    let url;
+    try {
+        url = new URL(value);
+    } catch {
+        return null;
+    }
+    if (url.protocol !== 'https:') return null;
+
+    const host = url.hostname.toLowerCase();
+    const github = host === 'avatars.githubusercontent.com';
+    const steam = host.endsWith('.steamstatic.com') || host === 'steamcdn-a.akamaihd.net';
+    return github || steam ? url : null;
 }
 
 async function getIdentity(db, provider, subject) {
@@ -300,7 +317,7 @@ async function readSession(request, db) {
     const now = Date.now();
     const row = await db.prepare(
         `SELECT s.token_hash, s.expires_at, s.last_seen_at,
-                u.id, u.display_name, u.avatar_url
+                u.id, u.display_name, u.avatar_url, u.updated_at
          FROM user_sessions s JOIN users u ON u.id = s.user_id
          WHERE s.token_hash = ?`
     ).bind(tokenHash).first();
@@ -316,6 +333,7 @@ async function readSession(request, db) {
     return {
         tokenHash,
         user: rowToUser(row, (identities.results || []).map((item) => item.provider)),
+        avatarSource: row.avatar_url || '',
         lastSeenAt: row.last_seen_at
     };
 }
@@ -501,6 +519,42 @@ async function handleMe(request, env, ctx) {
     });
 }
 
+async function handleAvatar(request, env) {
+    const session = await readSession(request, env.DB);
+    if (!session) return error(401, '未登录');
+
+    const source = trustedAvatarUrl(session.avatarSource);
+    if (!source) return error(404, '没有可用头像');
+
+    let upstream;
+    try {
+        upstream = await fetch(source, {
+            headers: { Accept: 'image/*' },
+            redirect: 'error'
+        });
+    } catch {
+        return error(502, '头像获取失败');
+    }
+    if (!upstream.ok) return error(502, '头像获取失败');
+
+    const contentType = upstream.headers.get('Content-Type') || '';
+    if (!contentType.startsWith('image/')) return error(415, '头像格式无效');
+
+    const declaredSize = Number(upstream.headers.get('Content-Length') || 0);
+    if (declaredSize > AVATAR_MAX_BYTES) return error(413, '头像文件过大');
+
+    const body = await upstream.arrayBuffer();
+    if (body.byteLength > AVATAR_MAX_BYTES) return error(413, '头像文件过大');
+
+    return new Response(body, {
+        headers: {
+            'Content-Type': contentType,
+            'Cache-Control': 'private, max-age=3600',
+            'Cross-Origin-Resource-Policy': 'same-origin'
+        }
+    });
+}
+
 async function handleLogout(request, env) {
     const session = await readSession(request, env.DB);
     if (session) {
@@ -515,6 +569,7 @@ export async function handleAccount(request, env, ctx, segments) {
     const method = request.method;
 
     if (action === 'me' && method === 'GET') return handleMe(request, env, ctx);
+    if (action === 'avatar' && method === 'GET') return handleAvatar(request, env);
     if (action === 'logout' && method === 'POST') return handleLogout(request, env);
 
     if (action === 'login' && method === 'GET') {
