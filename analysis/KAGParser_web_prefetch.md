@@ -89,9 +89,10 @@ return written
 本地 `EnsureSegment()` / `EnsureSegmentAsync()` 在打开当前 segment 前，把
 `Start + ArcSize` 作为 Web 存储边界提示传给 `tTVPLocalFileStream`；其余缓存查找、
 压缩段解压、filter 和游标更新顺序不变。VLFS 仍向 C++ 返回原来的 256 KiB 小读，
-但同一提示范围内的首次远程未命中会发一个 Range GET，响应保存为 Blob，后续小读
-只做 Blob slice。为复用既有 256 KiB OPFS 块格式，请求两端向块边界对齐，最多各多取
-不足一个块；后台仍按原块格式持久化，不改变 16 MiB 内存 LRU。
+但同一提示范围内的首次远程未命中只发一个 Range GET。响应体按到达顺序流入 Blob
+分片；每次小读只等待自己所需的末端字节，到达后立即恢复 C++ 续体，不等待完整
+segment。响应结束后再合并 Blob 并按既有 256 KiB OPFS 块格式后台持久化。请求两端
+仍向块边界对齐，最多各多取不足一个块；16 MiB 内存 LRU 保持不变。
 
 通常图片、语音等一个 XP3 逻辑资源只有一个物理 segment，因此由十几个 GET 降为
 一个 GET。XP3 格式允许一个逻辑资源由多个 segment 组成，这种情况会严格按物理

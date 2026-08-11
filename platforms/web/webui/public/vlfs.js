@@ -713,6 +713,15 @@
             var out;
             if (e.kind === 'overlay') {
                 out = e.data.subarray(f.pos, f.pos + n);
+            } else if (f.readAhead &&
+                       (e.kind === 'remote' ||
+                        (e.kind === 'zip' && e.method === 0 &&
+                         e.zipSource.kind === 'remote'))) {
+                // The source-level read-ahead stream already owns the complete
+                // remote range and its persistent block writes. Serve the
+                // caller's exact length so an unaligned XP3 segment does not
+                // wait for two entry-cache blocks before resuming C++.
+                out = await this._readSource(e, f.pos, n, f.readAhead);
             } else if (n >= DIRECT_READ_THRESHOLD) {
                 // 大读直读源，不污染块缓存
                 out = await this._readSource(e, f.pos, n, f.readAhead);
@@ -782,23 +791,129 @@
             return data;
         },
 
-        async _fetchRemoteRangeBlob(source, pos, len) {
+        async _startRemoteReadAhead(source, ahead) {
             var resp = await fetch(source.url, {
-                headers: { 'Range': 'bytes=' + pos + '-' + (pos + len - 1) }
+                headers: {
+                    'Range': 'bytes=' + ahead.fetchStart + '-' +
+                        (ahead.fetchEnd - 1)
+                }
             });
             if (resp.status !== 206 && resp.status !== 200)
                 throw new Error('range fetch ' + source.url + ': ' + resp.status);
-            var blob = await resp.blob();
-            if (resp.status === 200 && blob.size > len) {
-                if (pos + len > blob.size)
-                    throw new Error('short full response for ' + source.url);
-                blob = blob.slice(pos, pos + len);
-            } else if (blob.size > len) {
-                blob = blob.slice(0, len);
+
+            var stream = {
+                fetchStart: ahead.fetchStart,
+                fetchEnd: ahead.fetchEnd,
+                receivedEnd: ahead.fetchStart,
+                pieces: [],
+                blob: null,
+                error: null,
+                waiters: []
+            };
+
+            function settleWaiters() {
+                var pending = [];
+                for (var i = 0; i < stream.waiters.length; i++) {
+                    var waiter = stream.waiters[i];
+                    if (waiter.end <= stream.receivedEnd) waiter.resolve();
+                    else if (stream.error) waiter.reject(stream.error);
+                    else pending.push(waiter);
+                }
+                stream.waiters = pending;
             }
-            if (blob.size !== len)
-                throw new Error('short range ' + blob.size + ' < ' + len);
-            return blob;
+
+            function waitUntil(end) {
+                if (end <= stream.receivedEnd) return Promise.resolve();
+                if (stream.error) return Promise.reject(stream.error);
+                return new Promise(function (resolve, reject) {
+                    stream.waiters.push({ end: end, resolve: resolve, reject: reject });
+                });
+            }
+
+            stream.read = async function (pos, len) {
+                await waitUntil(pos + len);
+                var parts = [];
+                var covered = 0;
+                for (var i = 0; i < stream.pieces.length && covered < len; i++) {
+                    var piece = stream.pieces[i];
+                    var start = Math.max(pos, piece.start);
+                    var end = Math.min(pos + len, piece.end);
+                    if (end <= start) continue;
+                    parts.push(piece.blob.slice(
+                        start - piece.start, end - piece.start));
+                    covered += end - start;
+                }
+                if (covered !== len)
+                    throw new Error('read-ahead gap ' + covered + ' < ' + len);
+                return new Uint8Array(await new Blob(parts).arrayBuffer());
+            };
+
+            stream.done = (async function () {
+                var responsePos = resp.status === 200 ? 0 : ahead.fetchStart;
+                if (!resp.body) {
+                    var whole = await resp.blob();
+                    var start = ahead.fetchStart - responsePos;
+                    var end = ahead.fetchEnd - responsePos;
+                    if (start < 0 || end > whole.size)
+                        throw new Error('short range ' + whole.size + ' for ' +
+                                        source.url);
+                    var selected = whole.slice(start, end);
+                    stream.pieces.push({
+                        start: ahead.fetchStart,
+                        end: ahead.fetchEnd,
+                        blob: selected
+                    });
+                    stream.receivedEnd = ahead.fetchEnd;
+                    stream.blob = selected;
+                    settleWaiters();
+                    return;
+                }
+
+                var reader = resp.body.getReader();
+                while (stream.receivedEnd < ahead.fetchEnd) {
+                    var item = await reader.read();
+                    if (item.done) break;
+                    var chunkStart = responsePos;
+                    var chunkEnd = responsePos + item.value.byteLength;
+                    var useStart = Math.max(chunkStart, ahead.fetchStart);
+                    var useEnd = Math.min(chunkEnd, ahead.fetchEnd);
+                    if (useEnd > useStart) {
+                        if (useStart !== stream.receivedEnd)
+                            throw new Error('non-contiguous range @' + useStart);
+                        var bytes = item.value.subarray(
+                            useStart - chunkStart, useEnd - chunkStart);
+                        stream.pieces.push({
+                            start: useStart,
+                            end: useEnd,
+                            blob: new Blob([bytes])
+                        });
+                        stream.receivedEnd = useEnd;
+                        settleWaiters();
+                    }
+                    responsePos = chunkEnd;
+                }
+                if (stream.receivedEnd !== ahead.fetchEnd)
+                    throw new Error('short range ' +
+                                    (stream.receivedEnd - ahead.fetchStart) +
+                                    ' < ' + (ahead.fetchEnd - ahead.fetchStart));
+                try { await reader.cancel(); } catch (ignored) {}
+                stream.blob = new Blob(stream.pieces.map(function (piece) {
+                    return piece.blob;
+                }));
+                stream.pieces = [{
+                    start: ahead.fetchStart,
+                    end: ahead.fetchEnd,
+                    blob: stream.blob
+                }];
+            })().catch(function (error) {
+                stream.error = error;
+                settleWaiters();
+                throw error;
+            });
+            // Reads observe failures through their waiters. Keep a rejection
+            // handler attached even if the caller never asks for another block.
+            stream.done.catch(function () {});
+            return stream;
         },
 
         _getSourceReadAhead(readAhead, source, baseOffset) {
@@ -858,19 +973,25 @@
                     var blocks = [];
                     var canCheckCache = !!cache &&
                         !!window.KrKr2GameCache.hasBlock;
-                    var allCached = canCheckCache;
                     for (var index = first; index <= last; index++) {
                         var expected = Math.min(
                             BLOCK_SIZE, source.size - index * BLOCK_SIZE);
-                        var cached = canCheckCache
-                            ? await window.KrKr2GameCache.hasBlock(
-                                cache, index, expected)
-                            : false;
-                        if (!cached) allCached = false;
                         blocks.push({
-                            index: index, expected: expected, cached: cached
+                            index: index, expected: expected, cached: false
                         });
                     }
+
+                    if (canCheckCache) {
+                        var checks = await Promise.all(blocks.map(function (block) {
+                            return window.KrKr2GameCache.hasBlock(
+                                cache, block.index, block.expected);
+                        }));
+                        for (var ci = 0; ci < blocks.length; ci++)
+                            blocks[ci].cached = checks[ci];
+                    }
+                    var allCached = canCheckCache && blocks.every(function (block) {
+                        return block.cached;
+                    });
 
                     var hitCount = 0;
                     for (var i = 0; i < blocks.length; i++) {
@@ -883,18 +1004,21 @@
 
                     if (allCached) return { cacheOnly: true };
 
-                    var blob = await self._fetchRemoteRangeBlob(
-                        source, ahead.fetchStart,
-                        ahead.fetchEnd - ahead.fetchStart);
-                    if (cache) {
-                        state.persistence = self._persistReadAheadBlob(
-                            cache, ahead.fetchStart, blocks, blob);
-                        state.persistence.finally(function () {
-                            if (source._readAheadLoads.get(key) === state)
-                                source._readAheadLoads.delete(key);
-                        });
-                    }
-                    return { cacheOnly: false, blob: blob };
+                    var stream = await self._startRemoteReadAhead(source, ahead);
+                    state.persistence = stream.done.then(function () {
+                        if (cache) {
+                            return self._persistReadAheadBlob(
+                                cache, ahead.fetchStart, blocks, stream.blob);
+                        }
+                    });
+                    state.persistence.then(function () {
+                        if (source._readAheadLoads.get(key) === state)
+                            source._readAheadLoads.delete(key);
+                    }, function () {
+                        if (source._readAheadLoads.get(key) === state)
+                            source._readAheadLoads.delete(key);
+                    });
+                    return { cacheOnly: false, stream: stream };
                 })();
                 source._readAheadLoads.set(key, state);
                 state.result.then(function () {
@@ -980,10 +1104,12 @@
                 pos + len <= ahead.fetchEnd) {
                 var prepared = await this._prepareRemoteReadAhead(source, ahead);
                 if (!prepared.cacheOnly) {
-                    var offset = pos - ahead.fetchStart;
-                    var buffer = await prepared.blob.slice(
-                        offset, offset + len).arrayBuffer();
-                    return new Uint8Array(buffer);
+                    try {
+                        return await prepared.stream.read(pos, len);
+                    } catch (error) {
+                        ahead.prepared = null;
+                        throw error;
+                    }
                 }
             }
             return await this._readRemoteBlocks(source, pos, len);

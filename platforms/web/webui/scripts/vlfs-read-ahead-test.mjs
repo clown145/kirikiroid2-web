@@ -110,17 +110,20 @@ function makeContext(sources, ranges, persisted) {
         fetch: async (url, init = {}) => {
             const source = sources.get(url);
             assert.ok(source, `unexpected fetch URL: ${url}`);
+            const sourceBytes = source.bytes || source;
             const match = String(init.headers?.Range || '').match(/^bytes=(\d+)-(\d+)$/);
             assert.ok(match, `fetch without a single byte range: ${url}`);
             const start = Number(match[1]);
             const end = Number(match[2]);
-            assert.ok(start >= 0 && end >= start && end < source.length,
-                      `invalid range ${start}-${end} for ${source.length}`);
+            assert.ok(start >= 0 && end >= start && end < sourceBytes.length,
+                      `invalid range ${start}-${end} for ${sourceBytes.length}`);
             ranges.push({ url, start, end });
-            return new Response(source.slice(start, end + 1), {
+            const rangeBytes = sourceBytes.slice(start, end + 1);
+            const body = source.makeBody ? source.makeBody(rangeBytes) : rangeBytes;
+            return new Response(body, {
                 status: 206,
                 headers: {
-                    'Content-Range': `bytes ${start}-${end}/${source.length}`
+                    'Content-Range': `bytes ${start}-${end}/${sourceBytes.length}`
                 }
             });
         }
@@ -146,8 +149,27 @@ async function readExact(vlfs, fd, size) {
     const payload = makePayload(sourceSize, 11);
     const ranges = [];
     const persisted = new Map();
+    let releaseTail;
+    let tailDelivered = false;
+    const tailGate = new Promise((resolve) => { releaseTail = resolve; });
+    const streamedSource = {
+        bytes: payload,
+        makeBody(rangeBytes) {
+            return new ReadableStream({
+                start(controller) {
+                    controller.enqueue(rangeBytes.slice(0, 300000));
+                    tailGate.then(() => {
+                        tailDelivered = true;
+                        controller.enqueue(rangeBytes.slice(300000));
+                        controller.close();
+                    });
+                }
+            });
+        }
+    };
     const context = makeContext(
-        new Map([['https://test.invalid/data.xp3', payload]]), ranges, persisted);
+        new Map([['https://test.invalid/data.xp3', streamedSource]]),
+        ranges, persisted);
     const vlfs = context.window.VLFS;
     vlfs.setGameCacheId('read-ahead-test');
     vlfs.registerRemote(
@@ -159,7 +181,16 @@ async function readExact(vlfs, fd, size) {
     const fd = vlfs.open('/data.xp3', 0);
     assert.equal(vlfs.setReadAhead(fd, segmentStart, segmentLength), 0);
     assert.equal(vlfs.seek(fd, segmentStart, 0), segmentStart);
-    const actual = await readExact(vlfs, fd, segmentLength);
+    const first = await Promise.race([
+        vlfs.read(fd, BLOCK_SIZE),
+        new Promise((_, reject) => setTimeout(
+            () => reject(new Error('first block waited for the complete segment')), 1000))
+    ]);
+    assert.equal(tailDelivered, false,
+                 'first block is returned before the response tail arrives');
+    releaseTail();
+    const rest = await readExact(vlfs, fd, segmentLength - first.length);
+    const actual = concatChunks([first, rest]);
     assertBytesEqual(
         actual, payload.slice(segmentStart, segmentStart + segmentLength),
         'direct XP3 segment');
