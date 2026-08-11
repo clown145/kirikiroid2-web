@@ -254,14 +254,22 @@ const enterRunningState = (page) => page.evaluate(() => {
     await page.close();
 }
 
-// --- 桌面不受影响 ---
+// --- 桌面：保留紧凑可见入口，同时继续支持顶边 hover ---
 {
     const page = await newPage(false);
     await page.goto(`${BASE}/play/${GAME_ID}`, { waitUntil: 'networkidle2' });
     await new Promise((r) => setTimeout(r, 1200));
     await enterRunningState(page);
 
-    ok('桌面：不渲染把手', !(await page.$('.handle')));
+    const desktopHandle = await page.$('.handle');
+    ok('桌面：渲染紧凑顶部入口', desktopHandle);
+    if (desktopHandle) {
+        const box = await desktopHandle.boundingBox();
+        ok('桌面：入口尺寸不遮挡画面', box && box.width <= 44 && box.height <= 28);
+        await desktopHandle.click();
+        ok('桌面：点击入口能展开', await waitForToolbar(page));
+        await new Promise((r) => setTimeout(r, 3400));
+    }
     await page.mouse.move(640, 2);
     ok('桌面：鼠标移到顶端能展开', await waitForToolbar(page));
     await page.close();

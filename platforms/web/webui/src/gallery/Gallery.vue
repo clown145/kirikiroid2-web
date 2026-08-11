@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { api } from '../shared/api.js';
+import { requestDownloadHandoff } from '../shared/settings.js';
 import GameCard from './GameCard.vue';
 
 const games = ref([]);
@@ -142,15 +143,22 @@ async function skipFolder() {
     if (game) await beginDownload(game);
 }
 
-/*
- * MPA 下跳去播放页会销毁整个 Document，后台下载随之中断。
- * 已提交的连续前缀留在 OPFS，下次从该位置续传，所以这里只需告知，
- * 不必阻止。
- */
-function onNavigate(game, event) {
-    if (!dlState.value?.running) return;
+async function onNavigate(game, event) {
+    const current = window.KrKr2Cache?.downloadState?.();
+    if (!current?.running) return;
     event.preventDefault();
-    pendingNav.value = { game, href: `/play/${encodeURIComponent(game.id)}` };
+    const href = `/play/${encodeURIComponent(game.id)}`;
+
+    if (current.gameKey === game.id) {
+        // MPA 跳转会关闭旧连接，但播放页会复用同一份连续缓存，从已提交
+        // 前缀立刻续传。sessionStorage 只把这次用户意图交给同一标签页。
+        requestDownloadHandoff(game.id);
+        await window.KrKr2Cache.stopDownload();
+        location.href = href;
+        return;
+    }
+
+    pendingNav.value = { game, href };
 }
 
 async function confirmNav() {
@@ -331,17 +339,19 @@ onUnmounted(() => {
     <div v-if="dlState && dlState.running" class="dlbar">
         <div class="dlbar-in">
             <span class="dlbar-txt">
-                {{ dlState.retrying ? '网络中断，正在自动续传' : '正在下载' }}
+                {{ dlState.retrying
+                    ? '网络中断，正在自动续传'
+                    : (dlState.finalizing ? '下载完成，正在写入磁盘' : '正在下载') }}
                 <strong>{{ dlState.title || dlState.gameKey }}</strong>
                 · {{ dlState.pct }}%（{{ fmtBytes(dlState.bytes) }} / {{ fmtBytes(dlState.size) }}）
             </span>
-            <span class="dlbar-hint">离开本页会暂停，已下载的部分会保留</span>
+            <span class="dlbar-hint">进入当前游戏会接着下载，离开本站会暂停</span>
             <button class="btn btn-sm" @click="stopCurrentDownload">停止</button>
         </div>
         <div class="dlbar-track"><span :style="{ width: dlState.pct + '%' }" /></div>
     </div>
 
-    <!-- 跳转确认：不阻止离开，只是让玩家知道下载会停 -->
+    <!-- 正在下载别的游戏时才确认；进入当前游戏会自动交接，不弹框。 -->
     <div v-if="pendingNav" class="modal" @click.self="pendingNav = null">
         <div class="modal-box">
             <h3>下载将暂停</h3>

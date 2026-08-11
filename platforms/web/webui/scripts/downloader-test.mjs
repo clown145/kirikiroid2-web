@@ -149,6 +149,69 @@ try {
     ok(full.bytes === SIZE, `下满了全部字节（${full.bytes}/${SIZE}）`);
     ok(rangeRequests === 1, `完整资源只有一个 GET（实际 ${rangeRequests} 条）`);
 
+    // --- 完成收尾：reader.cancel() 永久不返回也必须完成最后一次落盘 ---
+    const cancelFinish = await page.evaluate(async () => {
+        const originalFetch = window.fetch;
+        let committed = 0;
+        let pending = 0;
+        const size = 4;
+        const cache = {
+            availableBytes: () => committed + pending,
+            isComplete: (expected) => committed + pending >= expected,
+            complete: () => committed >= size,
+            append(pos, bytes) {
+                if (pos !== committed + pending) return false;
+                pending += Math.min(bytes.length, size - pos);
+                return true;
+            },
+            shouldFlush: () => false,
+            async flush() { committed += pending; pending = 0; },
+            async reset() { committed = 0; pending = 0; }
+        };
+        let sent = false;
+        const reader = {
+            async read() {
+                if (sent) return { done: true };
+                sent = true;
+                return { done: false, value: new Uint8Array([1, 2, 3, 4]) };
+            },
+            cancel() { return new Promise(() => {}); }
+        };
+        window.fetch = async () => ({
+            ok: true,
+            status: 200,
+            headers: new Headers(),
+            body: { getReader: () => reader }
+        });
+        try {
+            const dl = window.KrKr2Downloader.create({
+                url: 'https://example.invalid/cancel.bin', size, cache
+            });
+            dl.start();
+            for (let i = 0; i < 100 && !dl.state().done; i++) {
+                await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            return dl.state();
+        } finally {
+            window.fetch = originalFetch;
+        }
+    });
+    ok(cancelFinish.done && cancelFinish.pct === 100,
+        '响应流取消悬挂时仍能提交最后一块并完成');
+
+    const finalizing = await page.evaluate(() => {
+        const cache = {
+            availableBytes: () => 10,
+            isComplete: () => true,
+            complete: () => false
+        };
+        return window.KrKr2Downloader.create({
+            url: 'https://example.invalid/finalizing.bin', size: 10, cache
+        }).state();
+    });
+    ok(finalizing.finalizing && finalizing.pct === 99,
+        '资源未落盘前显示写入中，不提前报告 100%');
+
     // 内容正确性：抽查三处
     const verify = await page.evaluate(async (url, size) => {
         const store = await window.KrKr2CacheStore.openOpfs();

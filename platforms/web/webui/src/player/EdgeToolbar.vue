@@ -3,11 +3,12 @@
 //
 // 取代旧的 #game-controls-bar —— 那个常驻在右上角，永远挡着画面。
 // 鼠标：指针移到屏幕最顶端 6px 即滑出。
-// 触屏：顶边下滑，外加一个顶部居中的小把手可直接点开 —— 只靠下滑在手机上
-// 不可靠（引擎会吃掉 canvas 上的 touch，系统/浏览器又会抢顶边手势）。
+// 桌面端保留一个紧凑的顶部把手，触屏端则扩大命中区并支持顶边下滑 ——
+// 只靠下滑在手机上不可靠（引擎会吃掉 canvas 上的 touch，系统/浏览器又会
+// 抢顶边手势）。
 // 露出后 3 秒无交互自动收起；指针停在条上时不收。
 
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 
 const props = defineProps({
     title: { type: String, default: '' },
@@ -71,6 +72,12 @@ function reveal() {
     showHint.value = false;
     scheduleHide();
 }
+
+// 缓存要等游戏源挂载后才出现。此刻主动展开一次，让边玩边下开关不会
+// 因工具栏早已收起而完全不可发现。
+watch(() => props.cacheState, (value, previous) => {
+    if (value && !previous) reveal();
+});
 
 function onPointerMove(e) {
     if (e.clientY <= HOT_ZONE_PX) reveal();
@@ -152,12 +159,11 @@ onUnmounted(() => {
     <!-- 热区本身不可见、不吃事件，只用来兜住指针位置判断 -->
     <div class="hotzone" aria-hidden="true" />
 
-    <!-- 触屏兜底：一个半透明小把手，点一下就展开。
-         手机上没有 hover，顶边下滑又常被系统手势截走，必须留个能点的入口。 -->
+    <!-- 顶部兜底入口：桌面端紧凑显示；手机没有 hover，命中区扩大到 44px。 -->
     <button
-        v-if="isTouch && !visible"
+        v-if="!visible"
         class="handle"
-        :class="{ dimmed: handleDimmed }"
+        :class="{ dimmed: handleDimmed && isTouch, touch: isTouch }"
         type="button"
         aria-label="显示控制栏"
         @click="reveal">
@@ -239,7 +245,7 @@ onUnmounted(() => {
     pointer-events: none;
 }
 
-/* 触屏把手：贴顶居中，默认很淡，不抢画面。
+/* 顶部把手：贴顶居中，默认很淡，不抢画面。
    z-index 要压过 LocalPicker 的 .backdrop，否则选文件界面上把手点不动。 */
 .handle {
     position: fixed;
@@ -265,6 +271,14 @@ onUnmounted(() => {
 }
 
 .handle:active { opacity: 1; }
+.handle:not(.touch) {
+    width: 40px;
+    min-height: 24px;
+    padding: 3px 0 5px;
+    border-radius: 0 0 6px 6px;
+    opacity: 0.35;
+}
+.handle:not(.touch):hover { opacity: 1; }
 
 /* 淡出后：视觉上完全消失，但仍留一条 24px 的贴顶命中带。
    背景/箭头都透明，所以不挡画面；顶边下滑被系统手势吃掉时还能点它兜底。

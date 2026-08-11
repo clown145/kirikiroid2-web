@@ -20,6 +20,13 @@
         return new Promise(function (resolve) { setTimeout(resolve, ms); });
     }
 
+    function progressPercent(bytes, size, done) {
+        if (!(size > 0)) return 0;
+        if (done) return 100;
+        // 已收齐但尚未提交到磁盘时仍属于进行中，不能提前显示 100%。
+        return Math.min(99, Math.floor(bytes / size * 100));
+    }
+
     function errorText(error) {
         return error && error.message ? error.message : String(error || '未知错误');
     }
@@ -248,7 +255,16 @@
             if (source.cache.shouldFlush()) await source.cache.flush();
             this._report();
             if (pos >= source.size) {
-                try { await reader.cancel(); } catch (e) {}
+                // 某些浏览器在响应末尾不会解决 cancel() 返回的 Promise。字节已
+                // 收齐时不能等待它，否则最后一次 flush 永远到不了，界面就会
+                // 卡在 100%。发起取消并中止该独立请求后直接提交缓存。
+                try {
+                    var cancelled = reader.cancel();
+                    if (cancelled && typeof cancelled.catch === 'function') {
+                        cancelled.catch(function () {});
+                    }
+                } catch (e) {}
+                try { opened.controller.abort(); } catch (e) {}
                 break;
             }
         }
@@ -397,15 +413,18 @@
 
     Downloader.prototype.state = function () {
         var bytes = this._availableBytes();
+        var done = this._done || this._isPersistedComplete();
+        var finalizing = !done && this._isComplete();
         return {
             url: this.url,
             size: this.size,
             bytes: bytes,
-            pct: this.size ? Math.min(100, Math.round(bytes / this.size * 100)) : 0,
+            pct: progressPercent(bytes, this.size, done),
             running: this._running,
             paused: this._paused,
             active: this._active,
-            done: this._done || this._isPersistedComplete(),
+            done: done,
+            finalizing: finalizing,
             mode: this.mode,
             retrying: this._retrying > 0,
             retryIn: this._retryAt ? Math.max(0, this._retryAt - Date.now()) : 0,

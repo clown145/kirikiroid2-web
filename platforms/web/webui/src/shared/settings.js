@@ -4,6 +4,8 @@
 // —— 播放页要在引擎起来之前就知道要不要开边玩边下。
 
 const KEY = 'krkr2-settings';
+const DOWNLOAD_HANDOFF_KEY = 'krkr2-download-handoff';
+const DOWNLOAD_HANDOFF_MAX_AGE = 12 * 60 * 60 * 1000;
 
 const DEFAULTS = {
     // 边玩边下：游戏运行时后台补齐尚未下载的字节。
@@ -44,6 +46,42 @@ export function setSetting(key, value) {
         // 写不进去就只在本次会话生效，不报错打断用户操作
     }
     return next;
+}
+
+/** 让完整下载在画廊 Document 卸载后由同一标签页的播放页继续。 */
+export function requestDownloadHandoff(gameKey) {
+    if (!gameKey) return false;
+    try {
+        sessionStorage.setItem(DOWNLOAD_HANDOFF_KEY, JSON.stringify({
+            gameKey: String(gameKey),
+            createdAt: Date.now()
+        }));
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+export function hasDownloadHandoff(gameKey) {
+    if (!gameKey) return false;
+    try {
+        const value = JSON.parse(sessionStorage.getItem(DOWNLOAD_HANDOFF_KEY) || 'null');
+        const valid = value && value.gameKey === String(gameKey) &&
+            Date.now() - Number(value.createdAt || 0) <= DOWNLOAD_HANDOFF_MAX_AGE;
+        if (!valid && value) sessionStorage.removeItem(DOWNLOAD_HANDOFF_KEY);
+        return !!valid;
+    } catch {
+        return false;
+    }
+}
+
+export function clearDownloadHandoff(gameKey) {
+    try {
+        if (gameKey && !hasDownloadHandoff(gameKey)) return;
+        sessionStorage.removeItem(DOWNLOAD_HANDOFF_KEY);
+    } catch {
+        // sessionStorage 在隐私模式下可能不可用，不影响正常游玩。
+    }
 }
 
 export { DEFAULTS };

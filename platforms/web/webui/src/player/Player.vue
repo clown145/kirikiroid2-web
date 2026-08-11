@@ -1,7 +1,12 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { api } from '../shared/api.js';
-import { getSetting, setSetting } from '../shared/settings.js';
+import {
+    getSetting,
+    setSetting,
+    hasDownloadHandoff,
+    clearDownloadHandoff
+} from '../shared/settings.js';
 import { useEngine } from './useEngine.js';
 import { useFullscreen } from './useFullscreen.js';
 import { attachSaveSpace } from './saveSpace.js';
@@ -60,19 +65,22 @@ async function exitToGallery() {
     // 整页跳转，不是路由切换：引擎是硬单例，必须靠 Document 销毁
     // 才能释放 Web Lock 和 wasm runtime。
     await window.KrKr2Cache?.stopDownload();
+    clearDownloadHandoff(gameId);
     location.href = '/';
 }
 
 // --- 边玩边下 --------------------------------------------------------
 // 只有库里的游戏（有 game.id）才有持久缓存，因此 cacheState 为 null 时
 // 工具栏根本不显示这个开关。
-const downloadEnabled = ref(getSetting('playWhileDownloading'));
+const downloadEnabled = ref(
+    getSetting('playWhileDownloading') || hasDownloadHandoff(gameId));
 const cacheState = ref(null);
 let cachePoll = null;
 
 function readCacheState() {
     const s = window.VLFS?.stats?.().cache;
     cacheState.value = s || null;
+    if (s?.done) clearDownloadHandoff(gameId);
     return s;
 }
 
@@ -81,7 +89,10 @@ function applyDownloadSetting() {
     if (downloadEnabled.value) {
         window.KrKr2Cache.startPlayDownload({
             onProgress: () => readCacheState(),
-            onDone: () => readCacheState()
+            onDone: () => {
+                clearDownloadHandoff(gameId);
+                readCacheState();
+            }
         });
     } else {
         window.KrKr2Cache.stopDownload();
@@ -92,6 +103,7 @@ function applyDownloadSetting() {
 function toggleDownload() {
     downloadEnabled.value = !downloadEnabled.value;
     setSetting('playWhileDownloading', downloadEnabled.value);   // 改动写回全局
+    if (!downloadEnabled.value) clearDownloadHandoff(gameId);
     applyDownloadSetting();
 }
 
