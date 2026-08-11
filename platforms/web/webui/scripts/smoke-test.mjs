@@ -108,25 +108,39 @@ async function visit(path, { wait = 1800, assert } = {}) {
 
 // --- 画廊页 ---
 await visit('/', {
-    assert: async (page) => ({
-        '渲染出游戏卡片': (await page.$$('.card')).length > 0,
-        '标题为“游戏库”': (await page.$eval('h1', (e) => e.textContent).catch(() => '')) === '游戏库',
-        '卡片链接指向 /game/': (await page.$$eval('.card', (els) =>
-            els.every((e) => e.getAttribute('href')?.startsWith('/game/'))).catch(() => false)),
-        '封面走 /api/cover 代理': (await page.$$eval('.card img', (els) =>
-            els.length === 0 || els.every((e) => e.getAttribute('src')?.startsWith('/api/cover/'))).catch(() => false)),
-        '搜索框存在': !!(await page.$('.search input')),
-        // 引擎地址必须取自 engineBase，不能写死。启用 KRKR2_ENGINE_BASE 后
-        // wasm 在 /engine/<版本>/ 下，写死 /index.wasm 会 404 —— 预热失灵
-        // 且每次进画廊都刷控制台错误。这里钉住"prefetch 与 engineBase 一致"。
-        'wasm 预热地址跟随 engineBase': await page.evaluate(() => {
-            const base = (window.KrKr2Config && window.KrKr2Config.engineBase) || '/';
-            const links = [...document.querySelectorAll('link[rel="prefetch"]')]
-                .map((l) => l.getAttribute('href'));
-            const wasm = links.filter((h) => h && h.endsWith('index.wasm'));
-            return wasm.length > 0 && wasm.every((h) => h === base + 'index.wasm');
-        })
-    })
+    assert: async (page) => {
+        await page.click('.account-login-trigger');
+        const account = await page.evaluate(() => ({
+            dialog: document.querySelector('.account-panel')?.textContent || '',
+            providers: [...document.querySelectorAll('.provider-button')]
+                .map((button) => button.textContent.trim()),
+            viewportFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth
+        }));
+        return {
+            '渲染出游戏卡片': (await page.$$('.card')).length > 0,
+            '标题为“游戏库”': (await page.$eval('h1', (e) => e.textContent).catch(() => '')) === '游戏库',
+            '卡片链接指向 /game/': (await page.$$eval('.card', (els) =>
+                els.every((e) => e.getAttribute('href')?.startsWith('/game/'))).catch(() => false)),
+            '封面走 /api/cover 代理': (await page.$$eval('.card img', (els) =>
+                els.length === 0 || els.every((e) => e.getAttribute('src')?.startsWith('/api/cover/'))).catch(() => false)),
+            '搜索框存在': !!(await page.$('.search input')),
+            '登录弹窗同时提供 Steam 与 GitHub':
+                account.providers.some((v) => v.includes('Steam')) &&
+                account.providers.some((v) => v.includes('GitHub')),
+            '登录弹窗明确本地游玩无需登录': account.dialog.includes('本地游玩无需登录'),
+            '画廊没有水平溢出': account.viewportFits,
+            // 引擎地址必须取自 engineBase，不能写死。启用 KRKR2_ENGINE_BASE 后
+            // wasm 在 /engine/<版本>/ 下，写死 /index.wasm 会 404 —— 预热失灵
+            // 且每次进画廊都刷控制台错误。这里钉住"prefetch 与 engineBase 一致"。
+            'wasm 预热地址跟随 engineBase': await page.evaluate(() => {
+                const base = (window.KrKr2Config && window.KrKr2Config.engineBase) || '/';
+                const links = [...document.querySelectorAll('link[rel="prefetch"]')]
+                    .map((l) => l.getAttribute('href'));
+                const wasm = links.filter((h) => h && h.endsWith('index.wasm'));
+                return wasm.length > 0 && wasm.every((h) => h === base + 'index.wasm');
+            })
+        };
+    }
 });
 
 // --- 后台登录 ---

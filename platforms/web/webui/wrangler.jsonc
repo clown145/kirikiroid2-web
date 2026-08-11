@@ -52,4 +52,10 @@
   //   ADMIN_PASSWORD_HASH   pbkdf2$<iters>$<b64salt>$<b64hash>
   //                         用 npm run hash-password '你的密码' 生成
   //   SESSION_SECRET        openssl rand -base64 32
+  //   GITHUB_CLIENT_ID      GitHub OAuth App client id
+  //   GITHUB_CLIENT_SECRET  GitHub OAuth App client secret
+  //   STEAM_WEB_API_KEY     可选；只用于补 Steam 昵称，OpenID 登录本身不需要
+  //
+  // 普通变量（推荐在 Worker 设置中配置）：
+  //   PUBLIC_ORIGIN         线上站点 origin，例如 https://play.example.com
 }

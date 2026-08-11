@@ -9,6 +9,7 @@ import {
 } from './auth.js';
 import { json, error } from './headers.js';
 import * as db from './db.js';
+import { handleAccount } from './user-auth.js';
 
 const PUBLIC_LIST_CACHE_KEY = 'https://krkr2.internal/api/games';
 const PUBLIC_LIST_MAX_AGE = 60;
@@ -348,6 +349,8 @@ export async function handleApi(request, env, ctx, pathname) {
         if (rest[0] === 'logout' && method === 'POST') return handleLogout();
         return error(404, 'Unknown auth endpoint');
     }
+
+    if (head === 'account') return handleAccount(request, env, ctx, rest);
 
     if (head === 'admin') return handleAdmin(request, env, ctx, rest);
 

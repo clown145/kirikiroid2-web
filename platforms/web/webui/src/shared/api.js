@@ -30,6 +30,10 @@ export const api = {
     listGames: () => request('/api/games').then((d) => d.games || []),
     getGame: (id) => request(`/api/games/${encodeURIComponent(id)}`).then((d) => d.game),
 
+    // --- 玩家账号（与管理员认证完全独立） ---
+    getAccount: () => request('/api/account/me'),
+    logoutAccount: () => request('/api/account/logout', { method: 'POST' }),
+
     // --- 认证 ---
     login: (password) => request('/api/auth/login', { method: 'POST', ...body({ password }) }),
     logout: () => request('/api/auth/logout', { method: 'POST' }),
@@ -56,6 +60,13 @@ export const api = {
     reorderGames: (ids) => request('/api/admin/reorder', { method: 'POST', ...body({ ids }) }),
     importGames: (games) => request('/api/admin/import', { method: 'POST', ...body({ games }) })
 };
+
+/** 返回同源登录/绑定入口。OAuth 完成后回到当前 Document 的原路径。 */
+export function accountLoginUrl(provider, { returnTo = '/', link = false } = {}) {
+    const params = new URLSearchParams({ returnTo });
+    if (link) params.set('link', '1');
+    return `/api/account/login/${encodeURIComponent(provider)}?${params}`;
+}
 
 /**
  * 封面地址。

@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { api, coverSrc } from '../shared/api.js';
+import AccountMenu from '../shared/AccountMenu.vue';
 import { requestDownloadHandoff } from '../shared/settings.js';
 
 const gameId = decodeURIComponent(location.pathname.replace(/^\/game\/?/, ''));
@@ -159,7 +160,10 @@ onUnmounted(() => {
             </svg>
             <span>Kirikiroid2</span>
         </a>
-        <a class="btn btn-ghost btn-sm" href="/">返回游戏库</a>
+        <div class="detail-nav-actions">
+            <a class="btn btn-ghost btn-sm" href="/">返回游戏库</a>
+            <AccountMenu />
+        </div>
     </header>
 
     <main class="detail-body">
@@ -254,6 +258,8 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.detail-nav-actions { display: flex; align-items: center; gap: var(--space-2); }
+
 .detail-body {
     max-width: 1080px;
     margin: 0 auto;
@@ -423,6 +429,8 @@ onUnmounted(() => {
 .modal-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 
 @media (max-width: 680px) {
+    .detail-nav .brand span { display: none; }
+    .detail-nav-actions { gap: var(--space-1); }
     .detail-nav { padding-left: var(--space-4); padding-right: var(--space-4); }
     .detail-body { padding: var(--space-5) var(--space-4) 72px; }
     .detail-layout { display: block; }

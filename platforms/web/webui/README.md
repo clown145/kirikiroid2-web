@@ -27,6 +27,41 @@ npx wrangler dev
 
 打开 http://localhost:8787 —— 初始库是空的，去 `/admin` 添加游戏。
 
+### 玩家登录（Steam + GitHub）
+
+玩家登录与 `/admin` 管理员密码完全独立。未登录仍能浏览、打开本地文件和游玩；
+第一次用 Steam 或 GitHub 登录时自动创建玩家账号，之后可在头像菜单绑定另一个平台。
+
+Steam 使用 OpenID 2.0，登录本身不需要 client id 或 secret。可选配置 Web API key，
+用于登录后显示 Steam 昵称；不配置时以 SteamID 后六位作为显示名：
+
+```bash
+npx wrangler secret put STEAM_WEB_API_KEY
+```
+
+GitHub 需要创建 OAuth App，并把 Authorization callback URL 设为：
+
+```text
+https://你的域名/api/account/callback/github
+```
+
+然后配置：
+
+```bash
+npx wrangler secret put GITHUB_CLIENT_ID
+npx wrangler secret put GITHUB_CLIENT_SECRET
+```
+
+线上建议同时设置 `PUBLIC_ORIGIN=https://你的域名`。本地调试 GitHub 登录需要单独的
+开发 OAuth App，把 callback 设为 `http://localhost:8787/api/account/callback/github`，
+并将对应变量写入 `.dev.vars`。Steam 会从当前请求自动生成本地 callback。
+
+新增玩家认证表后，部署前必须执行：
+
+```bash
+npm run db:remote
+```
+
 ---
 
 ## 部署

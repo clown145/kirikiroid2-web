@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { api } from '../shared/api.js';
+import AccountMenu from '../shared/AccountMenu.vue';
 import GameCard from './GameCard.vue';
 
 const games = ref([]);
@@ -262,6 +263,7 @@ onUnmounted(() => {
             <button class="btn btn-ghost btn-sm" @click="openCachePanel">本地缓存</button>
             <a class="btn btn-ghost btn-sm" href="/play/local">打开本地文件</a>
             <a class="btn btn-ghost btn-sm" href="/admin">管理</a>
+            <AccountMenu />
         </div>
     </header>
 
@@ -470,7 +472,7 @@ onUnmounted(() => {
 
 .brand svg { color: var(--fg-1); }
 
-.nav-right { display: flex; gap: var(--space-2); }
+.nav-right { display: flex; align-items: center; gap: var(--space-2); }
 
 .body {
     max-width: 1400px;
@@ -600,6 +602,8 @@ onUnmounted(() => {
 
 @media (max-width: 640px) {
     .nav { padding: var(--space-3) var(--space-4); }
+    .brand span { display: none; }
+    .nav-right { gap: var(--space-1); }
     .body { padding: var(--space-5) var(--space-4) var(--space-6); }
     .search { min-width: 0; width: 100%; }
     .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: var(--space-3); }
