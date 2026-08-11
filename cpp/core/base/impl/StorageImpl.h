@@ -61,11 +61,6 @@ public:
     void ReadAsync(void *buffer, tjs_uint read_size,
                    tAsyncCallback<tjs_uint> completion) override;
 
-#ifdef __EMSCRIPTEN__
-    // Web 远端存储合并提示；普通本地文件流上是无副作用操作。
-    void SetReadAheadRange(tjs_uint64 offset, tjs_uint64 length);
-#endif
-
     tjs_uint Write(const void *buffer, tjs_uint write_size) override;
 
     void SetEndOfStorage() override;

@@ -12,37 +12,12 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstring>
 #include <stdexcept>
 #include <memory>
 #include <string>
 #include <spdlog/spdlog.h>
 #ifdef EMSCRIPTEN
-#include "Application.h"
 #include <emscripten.h>
-#include <emscripten/threading.h>
-
-// 只在实际读流已成功创建后记录。持久化以异步 Promise 进行，它是
-// Web 平台的后置观察，不参与 Android CreateStream 的解析、返回或异常路径。
-EM_JS(void, TVPWebPrefetchRememberOpenedStorage, (const char *name), {
-    try {
-        var module = typeof Module !== 'undefined' ? Module :
-            (typeof globalThis !== 'undefined' ? globalThis.Module : null);
-        var cache = typeof globalThis !== 'undefined'
-            ? globalThis.KrKr2GameCache : null;
-        if(!module || !module._gameCacheId || !cache ||
-           typeof cache.rememberPrefetchPath !== 'function')
-            return;
-        var pending = cache.rememberPrefetchPath(
-            String(module._gameCacheId), UTF8ToString(name));
-        if(pending && typeof pending.catch === 'function')
-            pending.catch(function(error) {
-                console.warn('[prefetch] learned-path persistence failed:', error);
-            });
-    } catch(error) {
-        console.warn('[prefetch] learned-path recording failed:', error);
-    }
-});
 #endif
 #include "StorageIntf.h"
 #include "tjsUtils.h"
@@ -75,46 +50,6 @@ static tTJSStaticCriticalSection TVPCreateStreamCS;
 //---------------------------------------------------------------------------
 
 namespace {
-#ifdef EMSCRIPTEN
-    bool TVPWebPrefetchLearnableStorage(const ttstr &name) {
-        static const char *const extensions[] = {
-            ".png",  ".jpg",  ".jpeg", ".jif",  ".bmp",  ".dib",
-            ".tlg",  ".tlg5", ".tlg6", ".webp", ".jxr",  ".pvr",
-            ".bpg",  ".pimg", ".psb",  ".mtn",  ".wav",  ".ogg",
-            ".mp3",  ".m4a",  ".opus", ".aac",  ".flac", ".mid",
-            ".midi", ".wma",  ".mp4",  ".webm"
-        };
-        std::string lower = name.AsStdString();
-        std::transform(lower.begin(), lower.end(), lower.begin(),
-                       [](unsigned char ch) {
-                           return static_cast<char>(std::tolower(ch));
-                       });
-        for(const char *extension : extensions) {
-            const size_t length = std::strlen(extension);
-            if(lower.size() >= length &&
-               lower.compare(lower.size() - length, length, extension) == 0)
-                return true;
-        }
-        return false;
-    }
-
-    void TVPWebRememberPrefetchStorage(const ttstr &name, tjs_uint32 flags) {
-        if((flags & TJS_BS_ACCESS_MASK) != TJS_BS_READ ||
-           !TVPWebPrefetchLearnableStorage(name))
-            return;
-        const std::string narrow = name.AsStdString();
-        if(emscripten_is_main_runtime_thread()) {
-            TVPWebPrefetchRememberOpenedStorage(narrow.c_str());
-        } else if(Application) {
-            // 图像等解码可能在 pthread 中打开 stream；Worker 里没有
-            // window.KrKr2GameCache，必须经线程安全的应用消息队列回主线程。
-            Application->PostUserMessage([narrow]() {
-                TVPWebPrefetchRememberOpenedStorage(narrow.c_str());
-            });
-        }
-    }
-#endif
-
     bool TVPStorageLogoTraceEnabled() {
 #ifdef EMSCRIPTEN
         return EM_ASM_INT({
@@ -1384,9 +1319,6 @@ static tTJSBinaryStream *_TVPCreateStream(const ttstr &_name,
         arc->Release();
         TVPStorageTrace("storage.createStream.archive", _name, name, true,
                         true);
-#ifdef EMSCRIPTEN
-        TVPWebRememberPrefetchStorage(name, flags);
-#endif
         return stream;
     }
 
@@ -1401,9 +1333,6 @@ static tTJSBinaryStream *_TVPCreateStream(const ttstr &_name,
     if(access >= 1)
         TVPRemoveFromStorageCache(_name);
     TVPStorageTrace("storage.createStream.open", _name, name, true, true);
-#ifdef EMSCRIPTEN
-    TVPWebRememberPrefetchStorage(name, flags);
-#endif
     return stream;
 }
 

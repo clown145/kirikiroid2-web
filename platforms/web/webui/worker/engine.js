@@ -125,8 +125,8 @@ export async function serveEngine(request, env, ctx, pathname) {
             `${JSON.stringify(`/engine/${version}/`)};\n`;
         // no-cache 而非 no-store：这是版本指针，必须每次revalidate，但仍要
         // 允许被存下来 —— service worker 靠这份缓存让播放页离线可用
-        // （no-store 会让它连存都不能存，整页离线即挂）。SW 侧在线时
-        // network-first、断网时回退这份缓存，见 scripts/gen-sw.js。
+        // （no-store 会让它连存都不能存，整页离线即挂）。SW 侧对它走
+        // stale-while-revalidate，见 scripts/gen-sw.js 的 isVersionPointer。
         return new Response(body, {
             status: 200,
             headers: {

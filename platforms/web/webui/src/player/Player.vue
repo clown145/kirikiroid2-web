@@ -6,9 +6,7 @@ import { useFullscreen } from './useFullscreen.js';
 import { attachSaveSpace } from './saveSpace.js';
 import EdgeToolbar from './EdgeToolbar.vue';
 import SaveSpacePanel from './SaveSpacePanel.vue';
-import PrefetchSettingsPanel from './PrefetchSettingsPanel.vue';
 import LocalPicker from './LocalPicker.vue';
-import { loadPrefetchSettings, savePrefetchSettings } from './prefetchSettings.js';
 
 const container = ref(null);
 const canvas = ref(null);
@@ -16,22 +14,12 @@ const canvas = ref(null);
 const game = ref(null);
 const fatal = ref(null);          // 取游戏元数据阶段的错误
 const showSaves = ref(false);
-const showPrefetchSettings = ref(false);
 const xp3Choices = ref(null);     // 多 xp3 时的候选列表
 let xp3Resolve = null;
 
 const { phase, statusText, progress, errorInfo, boot, loadSource } = useEngine();
 const { isFullscreen, toggle: toggleFullscreen, available: fullscreenAvailable } =
     useFullscreen(container);
-const pageParams = new URLSearchParams(location.search);
-const storedPrefetchSettings = loadPrefetchSettings();
-// 查询参数只保留给 coi-server 等开发入口；游戏库/PWA 的正常入口由工具栏设置。
-const prefetchEnabled = pageParams.has('prefetch')
-    ? pageParams.get('prefetch') !== '0'
-    : storedPrefetchSettings.enabled;
-const prefetchTrace = pageParams.has('prefetchTrace')
-    ? pageParams.get('prefetchTrace') === '1'
-    : storedPrefetchSettings.trace;
 
 // /play/local 是"打开本地文件"入口，不对应任何库里的条目
 const gameId = decodeURIComponent(location.pathname.replace(/^\/play\/?/, ''));
@@ -41,9 +29,10 @@ const gameId = decodeURIComponent(location.pathname.replace(/^\/play\/?/, ''));
 // 也是唯一能脱离游戏库单测一个 xp3 的办法。旧 js/app.js 有这个能力，
 // 换 Vue 后必须保留，否则 `--xp3` 那套调试流程直接失效。
 const urlSource = (() => {
-    const xp3 = pageParams.get('xp3');
-    const zip = pageParams.get('game');
-    const entry = pageParams.get('entry') || undefined;
+    const p = new URLSearchParams(location.search);
+    const xp3 = p.get('xp3');
+    const zip = p.get('game');
+    const entry = p.get('entry') || undefined;
     // 与旧 app.js 一致：?game= 优先于 ?xp3=，两个都给时不猜意图
     if (zip) return { type: 'zip-url', url: zip, entry };
     if (xp3) return { type: 'xp3-url', url: xp3 };
@@ -70,22 +59,6 @@ function exitToGallery() {
     // 整页跳转，不是路由切换：引擎是硬单例，必须靠 Document 销毁
     // 才能释放 Web Lock 和 wasm runtime。
     location.href = '/';
-}
-
-function applyPrefetchSettings(value) {
-    try {
-        savePrefetchSettings(value);
-    } catch (err) {
-        window.alert(`保存预加载设置失败：${err.message || err}`);
-        return;
-    }
-
-    // 引擎是硬单例，Module 槽位只在 boot 前读取。去掉开发参数，避免它们
-    // 覆盖刚保存的产品设置，然后整页替换以销毁当前 wasm runtime。
-    const url = new URL(location.href);
-    url.searchParams.delete('prefetch');
-    url.searchParams.delete('prefetchTrace');
-    location.replace(url.href);
 }
 
 // --- canvas 尺寸跟随容器 + devicePixelRatio ---------------------------
@@ -143,11 +116,6 @@ function pickXp3(path) {
 /** 由 LocalPicker 触发：本地文件/目录已选好，直接注册进引擎。 */
 async function startLocalSource(src) {
     // 本地模式没有库条目，用固定空间，避免每个文件一个库
-    try {
-        await window.KrKr2Engine.setGameCacheId(null);
-    } catch (err) {
-        console.warn('[player] 无法关闭远程资源缓存上下文:', err);
-    }
     await window.KrKr2Engine.setSaveSpace('local', { remember: true, register: true });
     try {
         await loadSource(src, chooseEntry);
@@ -169,7 +137,9 @@ onMounted(async () => {
         return;
     }
 
-    const renderer = window.KrKr2FS.normalizeRenderer(pageParams.get('renderer'));
+    const params = new URLSearchParams(location.search);
+    const renderer = window.KrKr2FS.normalizeRenderer(params.get('renderer'));
+
     // 引擎脚本必须用绝对地址：当前页在 /play/<id>，
     // 相对的 'index.js' 会解析成 /play/index.js 而 404。
     //
@@ -179,9 +149,7 @@ onMounted(async () => {
     boot({
         canvas: canvas.value,
         renderer,
-        engineScript: engineBase() + 'index.js',
-        prefetchEnabled,
-        prefetchTrace
+        engineScript: engineBase() + 'index.js'
     });
 
     if (isLocalMode) return;   // 等 LocalPicker 给数据源
@@ -190,13 +158,6 @@ onMounted(async () => {
     // 存档空间用固定的 'url'：这类 URL 是临时调试目标，没有稳定 id 可绑，
     // 按 URL 建空间会让每次改路径都换一个新库。
     if (urlSource) {
-        try {
-            // 调试 URL 没有 D1 id，但 URL 本身在多次启动间稳定；与固定的
-            // save space 分开，避免多个 URL 共用同一份远程资源缓存。
-            await window.KrKr2Engine.setGameCacheId('url:' + urlSource.url);
-        } catch (err) {
-            console.warn('[player] 资源缓存绑定失败，本次只使用内存缓存:', err);
-        }
         try {
             await window.KrKr2Engine.setSaveSpace('url', { remember: true, register: true });
         } catch (err) {
@@ -222,12 +183,6 @@ onMounted(async () => {
     if (!game.value.downloadUrl) {
         fatal.value = '该条目尚未配置资源地址，请到管理后台补上 downloadUrl。';
         return;
-    }
-
-    try {
-        await window.KrKr2Engine.setGameCacheId(game.value.id);
-    } catch (err) {
-        console.warn('[player] 资源缓存绑定失败，本次只使用内存缓存:', err);
     }
 
     // 存档空间绑 game.id（并迁移旧的 save_<title>），标题改动不再丢档
@@ -274,8 +229,7 @@ onUnmounted(() => {
             :fullscreen-available="fullscreenAvailable"
             @exit="exitToGallery"
             @toggle-fullscreen="toggleFullscreen"
-            @open-saves="showSaves = true"
-            @open-prefetch-settings="showPrefetchSettings = true" />
+            @open-saves="showSaves = true" />
 
         <!-- 加载浮层：仅在引擎未跑起来时存在，跑起来后彻底移除，不留任何遮挡 -->
         <div v-if="busy" class="overlay">
@@ -312,12 +266,6 @@ onUnmounted(() => {
         </div>
 
         <SaveSpacePanel v-if="showSaves" @close="showSaves = false" />
-        <PrefetchSettingsPanel
-            v-if="showPrefetchSettings"
-            :enabled="prefetchEnabled"
-            :trace="prefetchTrace"
-            @close="showPrefetchSettings = false"
-            @apply="applyPrefetchSettings" />
 
         <!-- 致命错误 -->
         <div v-if="errorInfo || fatal" class="modal-backdrop">

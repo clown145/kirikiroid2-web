@@ -56,9 +56,6 @@ jobs:
         # 配合 KRKR2_ENGINE_DIR 在本地合成。
         run: npm run build
 
-      - name: Test engine version pointer cache policy
-        run: node scripts/sw-version-pointer-test.mjs
-
       - name: Validate Worker config
         # wrangler 的 dry-run 不联网、不需要 API token，但会真正打包 worker/
         # 并校验 wrangler.jsonc 的绑定。能挡住"改了 worker 路由但语法错"

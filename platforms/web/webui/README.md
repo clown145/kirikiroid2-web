@@ -211,8 +211,8 @@ R2 里是扁平 key（`index.wasm`、`index.js`……），每次构建覆盖 �
 于是引擎换版**不需要重新部署页面**，下次访问自动跟上；代价只有那个几百字节的
 版本指针每次要回源校验一次，换掉了给 22 MB 做条件请求的开销。
 
-> SW 侧对版本指针走 network-first：在线时立即使用最新版并更新离线副本，
-> 只有网络失败时才回退缓存。见 `scripts/gen-sw.js`。
+> SW 侧对版本指针走 stale-while-revalidate（先给缓存再后台更新），
+> 否则播放页离线不可用 —— 它靠这个文件启动。见 `scripts/gen-sw.js`。
 
 `build-web.yml` 会在引擎构建后自动上传。需要仓库配 `CLOUDFLARE_API_TOKEN` 与
 `CLOUDFLARE_ACCOUNT_ID`，桶名用仓库变量 `R2_ENGINE_BUCKET` 覆盖
@@ -230,33 +230,6 @@ R2 里是扁平 key（`index.wasm`、`index.js`……），每次构建覆盖 �
 **游戏包不经 Worker。**
 `js/loaders/remote.js` 的 HTTP Range 懒加载是核心优化，单个包可达数 GB，
 必须直连 R2。
-
-**游戏资源预载与持久缓存。**
-播放页会在 KAG 解析器取得标签后，对当前脚本位置后约 240 行、最多 4 个等待点
-做只读前瞻。它只接受字面 `storage=`，不执行表达式或宏；立绘/背景交给
-`TVPTouchImages`，语音按 256 KiB 小步经 `TVPCreateStream` 读取，所以 XP3 的
-分段、压缩和 filter 仍由引擎决定。远程 Range 读出的物理块会按 `game.id` 写入
-OPFS，ZIP 的 deflate 成品也在同一游戏目录下复用。服务器提供 `X-Content-SHA256`、
-`ETag` 或 `Last-Modified` 时，版本变化会自动使旧来源失效；没有 validator 则只
-使用会话缓存以避免误用旧资源。画廊每张卡片显示容量并可单独清理，存档仍在独立
-的 IndexedDB space 中。
-
-排查预载造成的卡顿时，从播放页顶部边缘唤出工具栏，打开“预加载”设置。这里可
-直接切换“启用资源预加载”和“输出预加载诊断”；应用后会整页重载，使设置在引擎
-启动前生效。设置保存在当前浏览器中，PWA/全屏模式不需要操作地址栏。
-
-查询参数仍作为 `coi-server` 等开发入口的临时覆盖：
-
-```text
-?prefetch=0                         # 关闭预载，做同场景 A/B 对照
-?prefetchTrace=1                    # 输出扫描、候选、队列、耗时和 VLFS 统计
-?prefetch=0&prefetchTrace=1         # 确认关闭状态也会输出 config/disabled
-```
-
-诊断日志统一以 `[prefetch]` 开头；图片和音频的排队日志都带脚本行号，音频还会
-带原始标签名。`graphic-queued` 只表示图片已交给异步图片加载器；
-`binary-done` 表示音频流已完整读完。日志中的 `vlfs={...}` 可用于判断
-`persistentHit`（OPFS 命中）与 `persistentMiss`（新分块下载）的变化。
 
 ---
 

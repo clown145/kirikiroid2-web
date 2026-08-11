@@ -92,11 +92,6 @@ EM_JS(double, vlfs_js_seek, (int fd, double offset, int whence), {
     return VLFS.seek(fd, offset, whence);
 });
 
-EM_JS(int, vlfs_js_set_read_ahead,
-      (int fd, double offset, double length), {
-          return VLFS.setReadAhead(fd, offset, length);
-      });
-
 EM_JS(double, vlfs_js_size, (int fd), { return VLFS.sizeOf(fd); });
 
 // FSA 懒元数据补全（罕见路径）
@@ -395,18 +390,6 @@ int64_t Seek(int fd, int64_t offset, int whence) {
         RunOnMainSync([&] { r = vlfs_js_seek(fd, (double)offset, whence); });
     }
     return (int64_t)r;
-}
-
-int SetReadAheadRange(int fd, uint64_t offset, uint64_t length) {
-    int r;
-    if(OnMain()) {
-        r = vlfs_js_set_read_ahead(fd, (double)offset, (double)length);
-    } else {
-        RunOnMainSync([&] {
-            r = vlfs_js_set_read_ahead(fd, (double)offset, (double)length);
-        });
-    }
-    return r;
 }
 
 int64_t Size(int fd) {

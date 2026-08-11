@@ -9,11 +9,6 @@
 //                            Platform.cpp 的 krkr2_get_startup_xp3_path()
 //                            经 EM_JS 读取。
 //   Module._saveSpaceId      当前存档空间 id（纯 JS 侧状态，供写回链路判断）
-//   Module._gameCacheId      当前远程资源缓存 id（与存档空间相互独立）
-//   Module._webPrefetchEnabled  KAG Web 资源前瞻总开关（默认 true）
-//   Module._webPrefetchTrace    输出 [prefetch] 诊断日志（默认 false）
-//   Module._webPrefetchLearnedPaths 按游戏加载的学习型资源清单
-//   Module._webPrefetchLearnedReady 上述清单是否已完成 OPFS 读取
 //   Module._hostDirHandle    File System Access 目录句柄（纯 JS 侧状态）
 //   Module._hostDirPrefix    上述句柄对应的引擎路径前缀（纯 JS 侧状态）
 // ────────────────────────────────────────────────────────────────────
@@ -44,8 +39,6 @@
     function buildModule() {
         var Module = {
             wasmMemory: window.KrKr2Memory.prealloc || undefined,
-            _webPrefetchLearnedPaths: [],
-            _webPrefetchLearnedReady: true,
 
             // glue 定位它需要的附属文件时都会走这里（参数是裸文件名）。
             //
@@ -136,15 +129,6 @@
         return Module;
     }
 
-    function appendPrefetchTrace(message) {
-        var records = window.__KRKR2_PREFETCH_LOGS__ ||
-            (window.__KRKR2_PREFETCH_LOGS__ = []);
-        records.push(message);
-        if (records.length > 200) {
-            records.splice(0, records.length - 200);
-        }
-    }
-
     // ---------------------------------------------------------------
     // 游戏源就绪 → 恢复存档 → 释放 user-file 依赖，引擎随即进入 main()
     // ---------------------------------------------------------------
@@ -186,8 +170,6 @@
          * @param {string}     [opts.engineScript]      glue 路径，默认 'index.js'
          * @param {string}     [opts.renderer]          '' | 'software' | 'opengl'
          * @param {string}     [opts.saveSpace]         存档空间 id
-         * @param {boolean}    [opts.prefetchEnabled]   是否启用 KAG 资源前瞻
-         * @param {boolean}    [opts.prefetchTrace]     是否输出资源前瞻诊断
          * @param {function}   [opts.onStatus]          (text, pct|null)
          * @param {function}   [opts.onIdle]            引擎不再加载任何东西
          * @param {function}   [opts.onReady]           引擎就绪，只差游戏源
@@ -203,16 +185,7 @@
             var Module = buildModule();
             Module.canvas = bootOpts.canvas || null;
             if (bootOpts.saveSpace) Module._saveSpaceId = bootOpts.saveSpace;
-            Module._webPrefetchEnabled = bootOpts.prefetchEnabled !== false;
-            Module._webPrefetchTrace = bootOpts.prefetchTrace === true;
             window.Module = Module;
-
-            if (Module._webPrefetchTrace) {
-                var traceLine = '[prefetch] config enabled=' +
-                    Module._webPrefetchEnabled;
-                appendPrefetchTrace(traceLine);
-                console.log(traceLine);
-            }
 
             Module.setStatus('Downloading engine...');
 
@@ -265,46 +238,6 @@
             if (opts.remember !== false) localStorage.setItem('krkr2-last-space', id);
             return window.KrKr2IDB.open(id).then(function () {
                 if (opts.register !== false) window.KrKr2IDB.registerSpace(id);
-            });
-        },
-
-        /** 设置远程资源分片所属游戏；不会创建或修改存档空间。 */
-        setGameCacheId: function (id) {
-            var cacheId = id === null || typeof id === 'undefined' || id === ''
-                ? '' : String(id);
-            if (window.Module) {
-                window.Module._gameCacheId = cacheId || null;
-                window.Module._webPrefetchLearnedPaths = [];
-                window.Module._webPrefetchLearnedReady = !cacheId;
-            }
-            return window.KrKr2VLFS.ready.then(function () {
-                VLFS.setGameCacheId(cacheId || null);
-                if (!cacheId || !window.KrKr2GameCache ||
-                    typeof window.KrKr2GameCache.loadPrefetchManifest !== 'function')
-                    return;
-                return window.KrKr2GameCache.loadPrefetchManifest(cacheId)
-                    .then(function (paths) {
-                        if (!window.Module ||
-                            String(window.Module._gameCacheId || '') !== cacheId)
-                            return;
-                        window.Module._webPrefetchLearnedPaths =
-                            Array.isArray(paths) ? paths : [];
-                        window.Module._webPrefetchLearnedReady = true;
-                        if (window.Module._webPrefetchTrace) {
-                            var line = '[prefetch] learned-ready game=' +
-                                cacheId + ' paths=' +
-                                window.Module._webPrefetchLearnedPaths.length;
-                            appendPrefetchTrace(line);
-                            console.log(line);
-                        }
-                    }).catch(function (error) {
-                        console.warn('[prefetch] learned manifest unavailable:', error);
-                        if (window.Module &&
-                            String(window.Module._gameCacheId || '') === cacheId) {
-                            window.Module._webPrefetchLearnedPaths = [];
-                            window.Module._webPrefetchLearnedReady = true;
-                        }
-                    });
             });
         },
 

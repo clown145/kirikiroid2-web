@@ -333,13 +333,6 @@ public:
 
 private:
     iTJSDispatch2 *_GetNextTag();
-#ifdef EMSCRIPTEN
-    // Web 平台只读前瞻游标。它不克隆/推进真实解析器，也不执行 TJS；从
-    // Scenario 原始行提取字面资源，并把静态 call/jump 目标交给异步前瞻队列。
-    ttstr WebPrefetchStorageName;
-    tjs_int WebPrefetchThroughLine;
-    void QueueWebScenarioPrefetch();
-#endif
     // taglist accumulator helpers (libkrkr2.so sub_561F3C @0x561F3C)
     void TagListClearItems(); // clear TagList (qword_1AB3C08 clear)
     void TagListAddName(const ttstr &name); // Array.add (qword_1AB3C18)

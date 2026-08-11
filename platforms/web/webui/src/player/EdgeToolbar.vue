@@ -15,9 +15,7 @@ const props = defineProps({
     fullscreenAvailable: { type: Boolean, default: true }
 });
 
-const emit = defineEmits([
-    'exit', 'toggle-fullscreen', 'open-saves', 'open-prefetch-settings'
-]);
+const emit = defineEmits(['exit', 'toggle-fullscreen', 'open-saves']);
 
 const visible = ref(false);
 const hovering = ref(false);
@@ -164,17 +162,6 @@ onUnmounted(() => {
             <span class="title" :title="title">{{ title }}</span>
 
             <div class="right">
-                <button
-                    class="btn btn-ghost btn-sm"
-                    type="button"
-                    @click="emit('open-prefetch-settings')"
-                    title="资源预加载设置">
-                    <svg viewBox="0 0 24 24" fill="currentColor" width="15" height="15" aria-hidden="true">
-                        <path d="M11 21h-1l1-7H7.5c-.88 0-.33-.75-.31-.78C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.4 0 .62.19.4.66C12.97 17.53 11 21 11 21z" />
-                    </svg>
-                    预加载
-                </button>
-
                 <button class="btn btn-ghost btn-sm" @click="emit('open-saves')" title="存档空间">
                     <svg viewBox="0 0 24 24" fill="currentColor" width="15" height="15" aria-hidden="true">
                         <path d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zm-5 16a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm3-10H5V5h10v4z" />

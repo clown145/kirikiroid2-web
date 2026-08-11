@@ -123,8 +123,8 @@ function isNeverCached(url) {
  * 一旦缓存，引擎就永远停在旧版本。
  *
  * 但也不能干脆不缓存：播放页靠它启动，不缓存则整页离线不可用。
- * 所以走 network-first —— 在线时立即使用最新指针并更新离线副本，只有
- * 网络失败才回退缓存。指针只有几百字节，不值得让引擎更新延迟一次访问。
+ * 所以走 stale-while-revalidate —— 先给缓存（离线可用、启动不等网络），
+ * 同时后台拉一份更新缓存。代价是引擎换版要下次访问才生效，可以接受。
  *
  * 带版本段的那些（/engine/<buildVersion>/xxx）反而可以放心 cache-first：
  * 换版即换 URL。 */
@@ -170,22 +170,20 @@ self.addEventListener('fetch', function (event) {
 
     if (isNeverCached(url)) return;   /* 交给网络，不拦截 */
 
-    /* 版本指针：network-first，离线时回退缓存 */
+    /* 版本指针：stale-while-revalidate */
     if (isVersionPointer(url)) {
         event.respondWith(
-            fetch(request).then(function (response) {
-                if (!response.ok) throw new Error('version pointer: ' + response.status);
-                var clone = response.clone();
-                return caches.open(CACHE_NAME).then(function (c) {
-                    return c.put(request, clone);
-                }).catch(function () {
-                    /* 在线响应仍可用；缓存写失败不应阻止引擎启动。 */
-                }).then(function () { return response; });
-            }).catch(function (error) {
-                return caches.match(request).then(function (cached) {
-                    if (cached) return cached;
-                    throw error;
-                });
+            caches.match(request).then(function (cached) {
+                var fetching = fetch(request).then(function (response) {
+                    if (response.ok) {
+                        var clone = response.clone();
+                        caches.open(CACHE_NAME).then(function (c) { c.put(request, clone); });
+                    }
+                    return response;
+                }).catch(function () { return cached; });
+                /* 有缓存就立刻返回，同时让上面那次 fetch 在后台跑完 */
+                if (cached) { event.waitUntil(fetching); return cached; }
+                return fetching;
             })
         );
         return;

@@ -111,10 +111,8 @@ await visit('/', {
     assert: async (page) => ({
         '渲染出游戏卡片': (await page.$$('.card')).length > 0,
         '标题为“游戏库”': (await page.$eval('h1', (e) => e.textContent).catch(() => '')) === '游戏库',
-        '卡片链接指向 /play/': (await page.$$eval('.card-link', (els) =>
+        '卡片链接指向 /play/': (await page.$$eval('.card', (els) =>
             els.every((e) => e.getAttribute('href')?.startsWith('/play/'))).catch(() => false)),
-        '每个游戏有独立缓存清理按钮': (await page.$$eval('.card', (els) =>
-            els.every((e) => !!e.querySelector('.cache-clear'))).catch(() => false)),
         '封面走 /api/cover 代理': (await page.$$eval('.card img', (els) =>
             els.length === 0 || els.every((e) => e.getAttribute('src')?.startsWith('/api/cover/'))).catch(() => false)),
         '搜索框存在': !!(await page.$('.search input')),
@@ -146,9 +144,7 @@ await visit('/admin', {
 });
 
 // --- 播放页（本地文件模式，不需要真游戏数据）---
-// 同时验证诊断参数在 glue 注入前写入 Module；C++ 侧只读这两个槽位，
-// 不直接碰 window.location，因此线程构建也不会丢参数。
-await visit('/play/local?prefetch=0&prefetchTrace=1', {
+await visit('/play/local', {
     wait: 4000,
     assert: async (page) => {
         const hasEngine = await page.evaluate(() => ({
@@ -157,8 +153,6 @@ await visit('/play/local?prefetch=0&prefetchTrace=1', {
             idb: typeof window.KrKr2IDB?.listSpaces === 'function',
             config: typeof window.KrKr2Config?.assetBase === 'string',
             assetBase: window.KrKr2Config?.assetBase,
-            prefetchEnabled: window.Module?._webPrefetchEnabled,
-            prefetchTrace: window.Module?._webPrefetchTrace,
             crossOriginIsolated: window.crossOriginIsolated
         }));
         console.log('    assetBase =', hasEngine.assetBase,
@@ -168,11 +162,8 @@ await visit('/play/local?prefetch=0&prefetchTrace=1', {
             'VLFS 已加载': hasEngine.vlfs,
             'KrKr2IDB 已加载': hasEngine.idb,
             'assetBase 配置存在': hasEngine.config,
-            'prefetch=0 关闭资源前瞻': hasEngine.prefetchEnabled === false,
-            'prefetchTrace=1 开启诊断': hasEngine.prefetchTrace === true,
             '跨源隔离生效(SharedArrayBuffer 可用)': hasEngine.crossOriginIsolated === true,
-            '显示本地文件选择器': !!(await page.$('.drop')),
-            '工具栏提供预加载设置': !!(await page.$('button[title="资源预加载设置"]'))
+            '显示本地文件选择器': !!(await page.$('.drop'))
         };
     }
 });

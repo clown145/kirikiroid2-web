@@ -47,10 +47,6 @@ int Close(int fd);
 // whence: SEEK_SET/SEEK_CUR/SEEK_END 语义（0/1/2）；返回新位置或 <0
 int64_t Seek(int fd, int64_t offset, int whence);
 
-// 声明接下来顺序读取所覆盖的完整物理区间。VLFS 可据此把多个小 Read
-// 合并成一个远端 Range 请求；不改变 fd 游标或 Read 的返回语义。
-int SetReadAheadRange(int fd, uint64_t offset, uint64_t length);
-
 // 文件尺寸；未知（FSA 懒元数据）时内部先异步补全
 int64_t Size(int fd);
 

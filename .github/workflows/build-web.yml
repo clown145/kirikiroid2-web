@@ -80,6 +80,13 @@ jobs:
           echo "${{ env.EMSDK }}/upstream/emscripten" >> $GITHUB_PATH
           echo "$(dirname $(find ${{ env.EMSDK }}/node -name node -type f | head -1))" >> $GITHUB_PATH
 
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        id: vcpkg-cache
+        with:
+          path: ${{ env.VCPKG_ROOT }}
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'vcpkg/**') }}
+
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
