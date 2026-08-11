@@ -1,7 +1,6 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { api } from '../shared/api.js';
-import { requestDownloadHandoff } from '../shared/settings.js';
 import GameCard from './GameCard.vue';
 
 const games = ref([]);
@@ -147,12 +146,11 @@ async function onNavigate(game, event) {
     const current = window.KrKr2Cache?.downloadState?.();
     if (!current?.running) return;
     event.preventDefault();
-    const href = `/play/${encodeURIComponent(game.id)}`;
+    const href = `/game/${encodeURIComponent(game.id)}`;
 
     if (current.gameKey === game.id) {
-        // MPA 跳转会关闭旧连接，但播放页会复用同一份连续缓存，从已提交
-        // 前缀立刻续传。sessionStorage 只把这次用户意图交给同一标签页。
-        requestDownloadHandoff(game.id);
+        // 详情页仍是独立导航，先提交当前连续前缀；真正进入播放器时
+        // 再由详情页写入 download handoff，避免只看详情也启动边玩边下。
         await window.KrKr2Cache.stopDownload();
         location.href = href;
         return;
@@ -357,12 +355,12 @@ onUnmounted(() => {
             <h3>下载将暂停</h3>
             <p>
                 《{{ dlState?.title || '当前游戏' }}》已下载 {{ dlState?.pct ?? 0 }}%。
-                进入游戏会离开本页，后台下载随之暂停 —— 已下载的部分保留在本地，
+                打开作品详情会离开本页，后台下载随之暂停 —— 已下载的部分保留在本地，
                 下次继续时从中断处接着下，不会从头再来。
             </p>
             <div class="modal-actions">
                 <button class="btn" @click="pendingNav = null">留在本页</button>
-                <button class="btn btn-primary" @click="confirmNav">仍然进入游戏</button>
+                <button class="btn btn-primary" @click="confirmNav">仍然打开详情</button>
             </div>
         </div>
     </div>

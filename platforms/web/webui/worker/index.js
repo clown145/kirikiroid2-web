@@ -1,7 +1,7 @@
 // Worker 入口：路由 + 安全头。
 //
-// 三个 HTML 入口是独立的页面（MPA），因为引擎是硬单例、退出游戏必须整页卸载。
-// 用户看到的仍是干净的 /、/play/<id>、/admin，由这里改写到对应的资源。
+// 播放页和后台是独立的页面入口；引擎是硬单例，退出游戏必须整页卸载。
+// 用户看到的仍是干净的 /、/game/<id>、/play/<id>、/admin，由这里改写到对应的资源。
 
 import { handleApi } from './api.js';
 import { serveEngine } from './engine.js';
@@ -63,6 +63,14 @@ export default {
             if ((pathname === '/play' || pathname.startsWith('/play/')) &&
                 isDocumentRequest(request)) {
                 const asset = await serveAsset(env, request, url, '/play.html');
+                return withSecurityHeaders(asset);
+            }
+
+            // --- 作品内页：/game/<id> 由画廊入口承载 ----------------------
+            // 详情页不加载引擎，和首页共用 index.html；只有点击“开始游戏”
+            // 才整页跳到 /play/<id>。
+            if (pathname.startsWith('/game/') && isDocumentRequest(request)) {
+                const asset = await serveAsset(env, request, url, '/index.html');
                 return withSecurityHeaders(asset);
             }
 

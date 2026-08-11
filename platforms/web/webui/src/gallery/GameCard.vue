@@ -44,7 +44,7 @@ function fmt(bytes) {
 <template>
     <a
         class="card"
-        :href="`/play/${encodeURIComponent(game.id)}`"
+        :href="`/game/${encodeURIComponent(game.id)}`"
         @click="emit('navigate', $event)">
         <div class="cover">
             <img
