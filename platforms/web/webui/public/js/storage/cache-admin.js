@@ -171,7 +171,8 @@
                 url: prepared.url,
                 probe: prepared.probe,
                 resourceKey: prepared.resourceKey,
-                resourcePath: prepared.path
+                resourcePath: prepared.path,
+                required: true
             });
             if (!cache) throw new Error('无法创建资源缓存：' + prepared.path);
             sources.push({
@@ -206,7 +207,7 @@
             if (!(probe.size > 0)) throw new Error('无法确定资源大小，无法下载');
             var cache = await window.KrKr2SourceProbe.openGameCache({
                 gameKey: info.gameKey, title: info.title,
-                url: info.url, probe: probe
+                url: info.url, probe: probe, required: true
             });
             if (!cache) throw new Error('缓存不可用，无法预下载');
             prepared = {
@@ -226,6 +227,8 @@
             fixedBytes: prepared.fixedBytes,
             fixedSize: prepared.fixedSize,
             mode: info.mode || 'full',
+            readIdleMs: info.readIdleMs,
+            retryBaseMs: info.retryBaseMs,
             onProgress: info.onProgress,
             onDone: function (s) {
                 if (info.onDone) info.onDone(s);

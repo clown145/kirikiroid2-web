@@ -23,6 +23,7 @@ for (let i = 0; i < SIZE; i++) BODY[i] = (i * 31 + 17) & 0xff;
 
 let rangeRequests = 0;
 let slowMs = 0;                          // 每 1MiB 的发送间隔
+let stallResponses = 0;                  // 写一段后保持连接不结束
 
 async function sendBody(res, body) {
     const step = 1024 * 1024;
@@ -61,11 +62,21 @@ const fileServer = createServer(async (req, res) => {
             'Content-Length': String(slice.length),
             'ETag': '"dl-test-v1"'
         });
+        if (stallResponses > 0) {
+            stallResponses--;
+            res.write(slice.subarray(0, Math.min(1024 * 1024, slice.length)));
+            return;
+        }
         await sendBody(res, slice);
         return;
     }
     rangeRequests++;
     res.writeHead(200, { ...cors, 'Content-Length': String(SIZE) });
+    if (stallResponses > 0) {
+        stallResponses--;
+        res.write(BODY.subarray(0, 1024 * 1024));
+        return;
+    }
     await sendBody(res, BODY);
 });
 
@@ -191,6 +202,37 @@ try {
     ok(finished.done && finished.bytes === SIZE, '续传后下载完成');
     ok(rangeRequests === 2,
         `首次 GET 加一次续传 Range，共 2 条请求（实际 ${rangeRequests}）`);
+
+    // --- 挂起恢复：响应有开头但永远不结束，超时后自动 Range 续传 ---
+    await page.evaluate(async () => { await window.KrKr2Cache.removeAll(); });
+    rangeRequests = 0;
+    stallResponses = 1;
+
+    const recovered = await page.evaluate(async (url, size) => {
+        let sawRetrying = false;
+        await window.KrKr2Cache.download({
+            gameKey: 'dltest', title: '下载测试', url,
+            readIdleMs: 200, retryBaseMs: 100
+        });
+        for (let i = 0; i < 400; i++) {
+            const state = window.KrKr2Cache.downloadState();
+            if (state?.retrying) sawRetrying = true;
+            if (state?.done || (state && !state.running)) break;
+            await new Promise((r) => setTimeout(r, 25));
+        }
+        const state = window.KrKr2Cache.downloadState();
+        return { state, sawRetrying, size };
+    }, FILE_URL, SIZE);
+
+    if (!recovered.state?.done || !recovered.sawRetrying || rangeRequests !== 2) {
+        console.log('    recovery diag: ' + JSON.stringify(recovered));
+    }
+
+    ok(recovered.sawRetrying, '无数据超时进入自动续传状态');
+    ok(recovered.state?.done && recovered.state.bytes === SIZE,
+        '挂起的响应自动恢复并下载完成');
+    ok(rangeRequests === 2,
+        `挂起连接后只增加一次续传 Range（实际 ${rangeRequests} 条请求）`);
 
     // --- 让路：引擎在等字节时不调度新块 ---
     await page.evaluate(async () => { await window.KrKr2Cache.removeAll(); });

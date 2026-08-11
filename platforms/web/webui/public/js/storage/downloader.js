@@ -12,11 +12,32 @@
     var CONCURRENCY_FULL = 6;
     var CONCURRENCY_PLAY = 3;
     var DEMAND_QUIET_MS = 500;
-    var MAX_RETRY = 3;
     var RETRY_BASE_MS = 1000;
+    var RETRY_MAX_MS = 30000;
+    var READ_IDLE_TIMEOUT_MS = 45000;
 
     function sleep(ms) {
         return new Promise(function (resolve) { setTimeout(resolve, ms); });
+    }
+
+    function errorText(error) {
+        return error && error.message ? error.message : String(error || '未知错误');
+    }
+
+    function httpError(status) {
+        var error = new Error('HTTP ' + status);
+        error.retriable = status === 408 || status === 425 || status === 429 || status >= 500;
+        return error;
+    }
+
+    function isRetriable(error) {
+        if (error && typeof error.retriable === 'boolean') return error.retriable;
+        if (error && /QuotaExceeded|NotAllowed|NoModificationAllowed|SecurityError/i.test(
+            (error.name || '') + ' ' + errorText(error))) return false;
+        // fetch() 的断网/CORS/连接重置通常是 TypeError；流提前结束也是普通 Error。
+        return !error || error.name === 'TypeError' || error.name === 'NetworkError' ||
+            error.name === 'AbortError' ||
+            /network|fetch|连接|超时|提前结束|body\s*stream|aborted/i.test(errorText(error));
     }
 
     function Downloader(opts) {
@@ -44,16 +65,21 @@
         this.onProgress = opts.onProgress || null;
         this.onDone = opts.onDone || null;
         this.onError = opts.onError || null;
+        this.readIdleMs = opts.readIdleMs > 0 ? opts.readIdleMs : READ_IDLE_TIMEOUT_MS;
+        this.retryBaseMs = opts.retryBaseMs > 0 ? opts.retryBaseMs : RETRY_BASE_MS;
 
         this._running = false;
         this._paused = false;
         this._active = 0;
-        this._abort = null;
+        this._requests = new Set();
         this._done = false;
         this._loop = null;
         this._nextSource = 0;
         this._fatal = null;
         this._discardOnStop = false;
+        this._retrying = 0;
+        this._retryAt = 0;
+        this._lastError = '';
     }
 
     Downloader.prototype._waitForTurn = async function () {
@@ -114,6 +140,20 @@
         return Promise.all(jobs);
     };
 
+    Downloader.prototype._abortRequests = function () {
+        for (var controller of this._requests) {
+            try { controller.abort(); } catch (e) {}
+        }
+        this._requests.clear();
+    };
+
+    Downloader.prototype._retryDelay = async function (ms) {
+        var end = Date.now() + ms;
+        while (this._running && Date.now() < end) {
+            await sleep(Math.min(250, end - Date.now()));
+        }
+    };
+
     Downloader.prototype._openResponse = async function (source, start) {
         var headers = {};
         var resetOnSuccess = false;
@@ -126,29 +166,61 @@
             start = 0;
         }
 
-        var response = await fetch(source.url, {
-            headers: headers,
-            signal: this._abort ? this._abort.signal : undefined,
-            priority: this.mode === 'play' ? 'low' : 'auto'
-        });
-        if (!response.ok) throw new Error('HTTP ' + response.status);
-        if (resetOnSuccess) await source.cache.reset();
+        var controller = new AbortController();
+        this._requests.add(controller);
+        var response;
+        try {
+            response = await fetch(source.url, {
+                headers: headers,
+                signal: controller.signal,
+                priority: this.mode === 'play' ? 'low' : 'auto'
+            });
+            if (!response.ok) throw httpError(response.status);
+            if (resetOnSuccess) await source.cache.reset();
 
-        if (start > 0 && response.status === 206) {
-            var contentRange = response.headers.get('Content-Range') || '';
-            var match = /^bytes\s+(\d+)-/i.exec(contentRange);
-            if (match && Number(match[1]) !== start) {
-                throw new Error('续传起点不匹配：' + contentRange);
+            if (start > 0 && response.status === 206) {
+                var contentRange = response.headers.get('Content-Range') || '';
+                var match = /^bytes\s+(\d+)-/i.exec(contentRange);
+                if (match && Number(match[1]) !== start) {
+                    throw new Error('续传起点不匹配：' + contentRange);
+                }
+            } else if (start > 0 && response.status === 200) {
+                // Range 被忽略或 If-Range 失效；当前响应已经是完整内容，直接重置
+                // 后从 0 消费它，不再补发第二个 GET。
+                await source.cache.reset();
+                start = 0;
+            } else if (start > 0) {
+                throw new Error('服务器未返回续传响应：HTTP ' + response.status);
             }
-        } else if (start > 0 && response.status === 200) {
-            // Range 被忽略或 If-Range 失效；当前响应已经是完整内容，直接重置
-            // 后从 0 消费它，不再补发第二个 GET。
-            await source.cache.reset();
-            start = 0;
-        } else if (start > 0) {
-            throw new Error('服务器未返回续传响应：HTTP ' + response.status);
+            return { response: response, start: start, controller: controller };
+        } catch (error) {
+            this._requests.delete(controller);
+            try { controller.abort(); } catch (e) {}
+            throw error;
         }
-        return { response: response, start: start };
+    };
+
+    Downloader.prototype._read = function (reader, controller) {
+        var timeout = this.readIdleMs;
+        var timer = null;
+        var timeoutError = null;
+        return Promise.race([
+            reader.read(),
+            new Promise(function (_, reject) {
+                timer = setTimeout(function () {
+                    timeoutError = new Error('接收数据超时，正在自动续传');
+                    timeoutError.retriable = true;
+                    try { controller.abort(timeoutError); } catch (e) {}
+                    reject(timeoutError);
+                }, timeout);
+            })
+        ]).catch(function (error) {
+            // abort() 可能先让 reader.read() 以浏览器内部错误拒绝；统一还原成
+            // 我们的可重试超时错误，避免被误判为永久失败。
+            throw timeoutError || error;
+        }).finally(function () {
+            if (timer !== null) clearTimeout(timer);
+        });
     };
 
     Downloader.prototype._consumeResponse = async function (source, opened) {
@@ -166,7 +238,7 @@
 
         while (this._running) {
             if (!await this._waitForTurn()) return;
-            var part = await reader.read();
+            var part = await this._read(reader, opened.controller);
             if (part.done) break;
             if (!part.value || !part.value.length) continue;
             if (!source.cache.append(pos, part.value)) {
@@ -192,17 +264,37 @@
             while (this._running && !source.cache.complete()) {
                 if (!await this._waitForTurn()) return;
                 var start = source.cache.availableBytes();
+                var opened = null;
                 try {
-                    var opened = await this._openResponse(source, start);
+                    opened = await this._openResponse(source, start);
                     await this._consumeResponse(source, opened);
                     if (!this._running) return;
                     if (!source.cache.complete()) throw new Error('下载响应提前结束');
+                    this._lastError = '';
                     return;
                 } catch (e) {
-                    if (e && e.name === 'AbortError') return;
-                    attempt++;
-                    if (attempt >= MAX_RETRY) throw e;
-                    await sleep(RETRY_BASE_MS * attempt);
+                    if (e && e.name === 'AbortError' && !this._running) return;
+                    if (!isRetriable(e)) throw e;
+
+                    // 连接在本轮拿到了新字节，就从短退避重新计数；长文件可以
+                    // 经历任意次偶发断流，而不会累计到某个固定次数后假死。
+                    attempt = source.cache.availableBytes() > start ? 1 : attempt + 1;
+                    var delay = Math.min(RETRY_MAX_MS, this.retryBaseMs *
+                        Math.pow(2, Math.min(attempt - 1, 5)));
+                    this._lastError = errorText(e);
+                    this._retryAt = Date.now() + delay;
+                    this._retrying++;
+                    console.warn('[downloader] ' + this._lastError +
+                        '，' + Math.ceil(delay / 1000) + ' 秒后续传：' + source.url);
+                    this._report();
+                    await this._retryDelay(delay);
+                    this._retrying--;
+                    if (!this._retrying) this._retryAt = 0;
+                    this._report();
+                } finally {
+                    if (opened && opened.controller) {
+                        this._requests.delete(opened.controller);
+                    }
                 }
             }
         } finally {
@@ -222,9 +314,7 @@
             } catch (e) {
                 this._fatal = e;
                 this._running = false;
-                if (this._abort) {
-                    try { this._abort.abort(); } catch (ignored) {}
-                }
+                this._abortRequests();
                 return;
             }
         }
@@ -267,7 +357,10 @@
         this._fatal = null;
         this._discardOnStop = false;
         this._nextSource = 0;
-        this._abort = new AbortController();
+        this._retrying = 0;
+        this._retryAt = 0;
+        this._lastError = '';
+        this._requests.clear();
         this._loop = this._run();
         this._report();
     };
@@ -287,10 +380,7 @@
         this._running = false;
         this._paused = false;
         this._discardOnStop = !!(opts && opts.discard);
-        if (this._abort) {
-            try { this._abort.abort(); } catch (e) {}
-            this._abort = null;
-        }
+        this._abortRequests();
         var flushed = this._discardOnStop
             ? Promise.resolve()
             : this._flush().catch(function () {});
@@ -316,7 +406,10 @@
             paused: this._paused,
             active: this._active,
             done: this._done || this._isPersistedComplete(),
-            mode: this.mode
+            mode: this.mode,
+            retrying: this._retrying > 0,
+            retryIn: this._retryAt ? Math.max(0, this._retryAt - Date.now()) : 0,
+            error: this._fatal ? errorText(this._fatal) : this._lastError
         };
     };
 

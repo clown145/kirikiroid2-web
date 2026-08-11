@@ -283,6 +283,62 @@ try {
     ok(folderLayout.bytes.join(',') === '7,8,9,10',
        '文件夹后端按 patch/data.xp3 原路径写入');
     ok(folderLayout.hasHiddenIndex, '文件夹后端只额外写入隐藏缓存索引');
+
+    // Windows Chromium 禁止网站在用户目录创建 .dll。用包装句柄模拟该拒绝，
+    // 验证逻辑路径不变、实体文件自动落到游戏目录内的隐藏保留区。
+    const blockedLayout = await second.evaluate(async () => {
+        const opfs = await navigator.storage.getDirectory();
+        try { await opfs.removeEntry('folder-blocked-test', { recursive: true }); } catch {}
+        const picked = await opfs.getDirectoryHandle('folder-blocked-test', { create: true });
+
+        function rejectDll(dir) {
+            return {
+                kind: 'directory',
+                name: dir.name,
+                async getDirectoryHandle(name, options) {
+                    return rejectDll(await dir.getDirectoryHandle(name, options));
+                },
+                async getFileHandle(name, options) {
+                    if (/\.dll$/i.test(name)) {
+                        throw new DOMException('不允许创建此文件类型', 'SecurityError');
+                    }
+                    return await dir.getFileHandle(name, options);
+                },
+                async removeEntry(name, options) {
+                    return await dir.removeEntry(name, options);
+                }
+            };
+        }
+
+        const store = await window.KrKr2CacheStore.openFolder(rejectDll(picked));
+        const cache = await store.open('blocked-game-id', {
+            fingerprint: 'blocked-v1', size: 4,
+            url: 'https://example.invalid/plugin/layerexyadraw.dll',
+            name: 'layerexyadraw.dll', title: 'Windows 文件夹游戏',
+            resourceKey: 'file:/plugin/layerexyadraw.dll',
+            resourcePath: '/plugin/layerexyadraw.dll'
+        });
+        await cache.replace(new Uint8Array([11, 12, 13, 14]));
+        const index = await store._loadIndex();
+        const game = index.games['blocked-game-id'];
+        const record = game.resources['file:/plugin/layerexyadraw.dll'];
+        const gameDir = await picked.getDirectoryHandle(game.dir);
+        const parts = record.storagePath.split('/');
+        let dir = gameDir;
+        for (const part of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(part);
+        const file = await (await dir.getFileHandle(parts.at(-1))).getFile();
+        const bytes = [...new Uint8Array(await file.arrayBuffer())];
+        await store.removeAll();
+        await opfs.removeEntry('folder-blocked-test', { recursive: true });
+        return { path: record.path, storagePath: record.storagePath, bytes };
+    });
+    ok(blockedLayout.path === 'plugin/layerexyadraw.dll',
+       '受限扩展名仍保留 manifest 逻辑路径');
+    ok(blockedLayout.storagePath.startsWith('.krkr2-cache/files/') &&
+       blockedLayout.storagePath.endsWith('.bin'),
+       `受限扩展名映射到隐藏实体文件（${blockedLayout.storagePath}）`);
+    ok(blockedLayout.bytes.join(',') === '11,12,13,14',
+       '映射后的实体文件可正常写入和读回');
 } catch (error) {
     console.log('  FAIL  测试执行异常: ' + (error?.stack || error));
     failures++;

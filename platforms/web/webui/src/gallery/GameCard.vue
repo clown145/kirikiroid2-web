@@ -27,6 +27,7 @@ const partialPct = computed(() => {
 
 const downloadTitle = computed(() => {
     if (cached.value) return '已完整下载到本地，游玩时不再消耗流量';
+    if (props.downloading?.retrying) return '网络暂时中断，正在自动续传；点击停止';
     if (props.downloading) return '正在下载，点击暂停';
     if (partialPct.value > 0) return `继续下载（已有 ${partialPct.value}%）`;
     return '完整下载：先下完再玩，全程无加载等待';
@@ -98,7 +99,9 @@ function fmt(bytes) {
                     <span v-for="tag in game.tags.slice(0, 3)" :key="tag" class="tag">{{ tag }}</span>
                 </div>
                 <span v-if="cached" class="cache-note" :title="`已缓存 ${fmt(cacheInfo.bytes)}`">已下载</span>
-                <span v-else-if="downloading" class="cache-note on">{{ downloading.pct }}%</span>
+                <span v-else-if="downloading" class="cache-note on">
+                    {{ downloading.retrying ? '续传中' : downloading.pct + '%' }}
+                </span>
                 <span v-else-if="partialPct" class="cache-note">{{ partialPct }}%</span>
             </div>
         </div>

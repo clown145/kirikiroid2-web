@@ -103,6 +103,7 @@
             return cache;
         } catch (e) {
             console.warn('[cache] 缓存不可用，降级为纯网络：', e);
+            if (info.required) throw e;
             return null;
         }
     }

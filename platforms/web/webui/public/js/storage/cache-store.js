@@ -20,6 +20,11 @@
     var QUOTA_FRACTION = 0.5;
     var QUOTA_CAP_BYTES = 20 * 1024 * 1024 * 1024;
     var SINGLE_RESOURCE_ID = '@source';
+    var FOLDER_BLOCKED_EXTENSIONS = new Set([
+        'bat', 'cmd', 'com', 'cpl', 'dll', 'drv', 'exe', 'lnk', 'msi', 'msp',
+        'pif', 'ps1', 'reg', 'scr', 'sys', 'vb', 'vbe', 'vbs', 'ws', 'wsc',
+        'wsf', 'wsh'
+    ]);
 
     function fnv1a(s) {
         var h = 0x811c9dc5;
@@ -68,6 +73,23 @@
             out.push(safePathSegment(parts[i], '_'));
         }
         return out.join('/') || 'data.bin';
+    }
+
+    function folderBlocksPath(path) {
+        var name = path.substring(path.lastIndexOf('/') + 1);
+        var dot = name.lastIndexOf('.');
+        if (dot < 0) return false;
+        return FOLDER_BLOCKED_EXTENSIONS.has(name.substring(dot + 1).toLowerCase());
+    }
+
+    /*
+     * Chromium 在 Windows 上禁止网站向用户目录创建 .dll/.exe 等可执行文件。
+     * 这些资源仍以 manifest 原路径注册给 VLFS；只有实体文件落到内部保留区。
+     */
+    function folderStoragePath(path) {
+        var name = path.substring(path.lastIndexOf('/') + 1);
+        return '.krkr2-cache/files/' + safePathSegment(name, 'resource') + '-' +
+            fnv1a(path.toLowerCase()) + '.bin';
     }
 
     function resourceId(resourceKey) {
@@ -411,7 +433,10 @@
             var id = ids[i];
             if (keep.has(id)) continue;
             await this._retire(gameKey, id, true);
-            if (gameDir) await removeFilePath(gameDir, game.resources[id].path);
+            if (gameDir) {
+                await removeFilePath(gameDir,
+                    game.resources[id].storagePath || game.resources[id].path);
+            }
             delete game.resources[id];
             changed = true;
         }
@@ -451,34 +476,55 @@
             }
         }
         var record = game.resources[id];
+        var oldStoragePath = record && safeResourcePath(record.storagePath || record.path);
+        var storagePath = this.kind === 'folder' && folderBlocksPath(path)
+            ? folderStoragePath(path)
+            : path;
         var stale = !record || record.fingerprint !== info.fingerprint ||
-            record.size !== info.size || record.path !== path;
+            record.size !== info.size || record.path !== path ||
+            oldStoragePath !== storagePath;
 
         var gameDir;
         try { gameDir = await this.root.getDirectoryHandle(game.dir, { create: true }); }
         catch (e) {
-            console.warn('[cache] 无法创建游戏目录：', e);
-            return null;
+            throw new Error('无法创建游戏目录：' + (e && e.message || e));
         }
 
-        if (record && record.path !== path) await removeFilePath(gameDir, record.path);
+        if (record && oldStoragePath !== storagePath) {
+            await removeFilePath(gameDir, oldStoragePath);
+        }
         var fileHandle;
-        try { fileHandle = await fileHandleForPath(gameDir, path, true); }
-        catch (e) {
-            console.warn('[cache] 无法创建资源路径 ' + path + '：', e);
-            return null;
+        try {
+            fileHandle = await fileHandleForPath(gameDir, storagePath, true);
+            if (stale) await truncateFile(fileHandle);
+        } catch (firstError) {
+            var fallbackPath = folderStoragePath(path);
+            if (this.kind !== 'folder' || storagePath === fallbackPath) {
+                throw new Error('无法创建资源路径 ' + path + '：' +
+                    (firstError && firstError.message || firstError));
+            }
+
+            // Chrome 的受限扩展名列表会变化；未预知的拒绝也自动落到保留区。
+            storagePath = fallbackPath;
+            stale = true;
+            if (oldStoragePath && oldStoragePath !== storagePath) {
+                await removeFilePath(gameDir, oldStoragePath);
+            }
+            try {
+                fileHandle = await fileHandleForPath(gameDir, storagePath, true);
+                await truncateFile(fileHandle);
+            } catch (fallbackError) {
+                throw new Error('无法创建资源路径 ' + path + '：' +
+                    (fallbackError && fallbackError.message || fallbackError));
+            }
         }
 
         if (stale) {
             if (record) console.log('[cache] 源已变化，重置连续下载：' + gameKey + '/' + path);
-            try { await truncateFile(fileHandle); }
-            catch (e) {
-                console.warn('[cache] 无法重置资源文件：', e);
-                return null;
-            }
             record = {
                 resourceKey: info.resourceKey || '',
                 path: path,
+                storagePath: storagePath,
                 url: info.url,
                 size: info.size,
                 fingerprint: info.fingerprint,
@@ -487,6 +533,7 @@
             game.resources[id] = record;
         } else {
             record.url = info.url;
+            record.storagePath = storagePath;
         }
 
         var cache = new GameCache(this, gameKey, id, gameDir, fileHandle, record);

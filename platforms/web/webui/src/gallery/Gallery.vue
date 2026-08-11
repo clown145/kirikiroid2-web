@@ -103,7 +103,15 @@ async function beginDownload(game) {
             gameKey: game.id,
             title: game.title,
             url: (game.downloadUrl || '').trim(),
-            onDone: () => { refreshCache(); }
+            onDone: () => { refreshCache(); },
+            onError: (error) => {
+                const message = error?.message || String(error || '未知错误');
+                window.KrKr2Cache.stopDownload().finally(async () => {
+                    dlState.value = null;
+                    await refreshCache();
+                    alert('下载已停止：' + message);
+                });
+            }
         });
         pollDownload();
     } catch (err) {
@@ -323,7 +331,8 @@ onUnmounted(() => {
     <div v-if="dlState && dlState.running" class="dlbar">
         <div class="dlbar-in">
             <span class="dlbar-txt">
-                正在下载 <strong>{{ dlState.title || dlState.gameKey }}</strong>
+                {{ dlState.retrying ? '网络中断，正在自动续传' : '正在下载' }}
+                <strong>{{ dlState.title || dlState.gameKey }}</strong>
                 · {{ dlState.pct }}%（{{ fmtBytes(dlState.bytes) }} / {{ fmtBytes(dlState.size) }}）
             </span>
             <span class="dlbar-hint">离开本页会暂停，已下载的部分会保留</span>
