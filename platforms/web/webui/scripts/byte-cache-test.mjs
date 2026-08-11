@@ -1,9 +1,8 @@
 // 字节缓存端到端测试。
 //
-// 验证的是"预加载"这套东西的核心断言：同一段字节只应该走一次网络。
-// 因此测的是真实的 vlfs.js + cache-store.js（不复刻逻辑），并用一台
-// 自带请求计数的 Range 服务器直接数 HTTP 请求条数 —— 命中率靠计数说话，
-// 不靠内部统计字段自证。
+// 验证连续前缀模型：随机按需读取只在当前 Document 的 VLFS 块 LRU 中复用，
+// 不落成持久化空洞；完整下载用一个 GET 顺序写满后，跨 Document 任意读取
+// 都命中本地文件。
 //
 // 自己拉起 vite dev 与文件服务器，`node scripts/byte-cache-test.mjs` 即可跑。
 
@@ -122,12 +121,10 @@ try {
 
     // 全局对象都在（play.html 的 classic script 已执行）
     const globals = await page.evaluate(() => ({
-        rangeSet: typeof window.KrKr2RangeSet === 'function',
         store: !!window.KrKr2CacheStore,
         admin: !!window.KrKr2Cache,
         vlfs: !!window.VLFS
     }));
-    ok(globals.rangeSet, 'KrKr2RangeSet 已加载');
     ok(globals.store, 'KrKr2CacheStore 已加载');
     ok(globals.admin, 'KrKr2Cache 已加载');
     ok(globals.vlfs, 'VLFS 已加载');
@@ -155,7 +152,6 @@ try {
             window.VLFS.close(fd);
             got.push({ pos, len, first: data[0], last: data[data.length - 1], n: data.length });
         }
-        await cache.flush();
         return { got, stats: window.VLFS.stats(), bytes: cache.bytes() };
     }, FILE_URL, SIZE);
 
@@ -168,7 +164,7 @@ try {
     }
     ok(contentOk, '冷缓存读回的字节内容正确（三段：头/中/尾）');
     ok(first.stats.network > 0, `冷缓存走了网络（network=${first.stats.network}）`);
-    ok(first.bytes > 0, `落盘了字节（${first.bytes}）`);
+    ok(first.bytes === 0, '随机按需读取不制造持久化空洞');
 
     const afterFirst = rangeRequests;
     ok(afterFirst > 0, `服务器确实收到 Range 请求（${afterFirst} 条）`);
@@ -197,7 +193,25 @@ try {
     ok(rangeRequests === afterFirst,
         `重复读没有新增网络请求（仍为 ${rangeRequests} 条）`);
 
-    // --- 第三轮：模拟刷新页面，缓存必须跨 Document 存活 ---
+    // --- 完整下载：一个普通 GET 顺序写满 ---
+    const beforeDownload = rangeRequests;
+    const downloaded = await page.evaluate(async (url, size) => {
+        await window.KrKr2Cache.download({
+            gameKey: 'bctest', title: '字节缓存测试', url
+        });
+        for (let i = 0; i < 300; i++) {
+            const state = window.KrKr2Cache.downloadState();
+            if (state?.done) break;
+            await new Promise((r) => setTimeout(r, 50));
+        }
+        const state = window.KrKr2Cache.downloadState();
+        return { done: state?.done, bytes: state?.bytes, size };
+    }, FILE_URL, SIZE);
+    ok(downloaded.done && downloaded.bytes === SIZE, '连续完整下载写满源文件');
+    ok(rangeRequests === beforeDownload + 1,
+        `完整下载只新增一个 GET（${beforeDownload} → ${rangeRequests}）`);
+
+    // --- 第三轮：模拟刷新页面，完整文件必须跨 Document 存活 ---
     const beforeReload = rangeRequests;
     const page2 = await browser.newPage();
     page2.on('console', (m) => {
@@ -229,7 +243,8 @@ try {
         return { restored, got, stats: window.VLFS.stats() };
     }, FILE_URL, SIZE);
 
-    ok(third.restored > 0, `新 Document 从 meta.json 恢复了区间（${third.restored} 字节）`);
+    ok(third.restored === SIZE,
+        `新 Document 恢复完整连续前缀（${third.restored}/${SIZE} 字节）`);
 
     let third_ok = true;
     for (const g of third.got) {

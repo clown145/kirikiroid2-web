@@ -74,7 +74,7 @@ async function onDownload(game) {
     const cur = window.KrKr2Cache.downloadState();
     // 再点正在下的那个 = 停止（进度已落盘，下次续传）
     if (cur && cur.gameKey === game.id) {
-        window.KrKr2Cache.stopDownload();
+        await window.KrKr2Cache.stopDownload();
         dlState.value = null;
         await refreshCache();
         return;
@@ -136,7 +136,8 @@ async function skipFolder() {
 
 /*
  * MPA 下跳去播放页会销毁整个 Document，后台下载随之中断。
- * 已下的区间留在 OPFS，下次从洞继续，所以这里只需告知，不必阻止。
+ * 已提交的连续前缀留在 OPFS，下次从该位置续传，所以这里只需告知，
+ * 不必阻止。
  */
 function onNavigate(game, event) {
     if (!dlState.value?.running) return;
@@ -144,17 +145,17 @@ function onNavigate(game, event) {
     pendingNav.value = { game, href: `/play/${encodeURIComponent(game.id)}` };
 }
 
-function confirmNav() {
+async function confirmNav() {
     const href = pendingNav.value?.href;
-    window.KrKr2Cache?.stopDownload();      // 保存进度再走
+    await window.KrKr2Cache?.stopDownload();      // 提交连续前缀再走
     pendingNav.value = null;
     if (href) location.href = href;
 }
 
-function stopCurrentDownload() {
-    window.KrKr2Cache?.stopDownload();
+async function stopCurrentDownload() {
+    await window.KrKr2Cache?.stopDownload();
     dlState.value = null;
-    refreshCache();
+    await refreshCache();
 }
 
 async function removeCache(gameKey) {

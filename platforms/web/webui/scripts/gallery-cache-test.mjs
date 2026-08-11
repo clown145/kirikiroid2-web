@@ -35,7 +35,6 @@ try {
 
     // 画廊页不加载引擎，但缓存这套必须可用
     const globals = await page.evaluate(() => ({
-        rangeSet: typeof window.KrKr2RangeSet === 'function',
         store: !!window.KrKr2CacheStore,
         probe: !!window.KrKr2SourceProbe,
         downloader: !!window.KrKr2Downloader,
@@ -44,8 +43,8 @@ try {
         // 引擎相关的东西不该出现在画廊页
         noEngine: !window.KrKr2Engine && !window.VLFS
     }));
-    ok(globals.rangeSet && globals.store && globals.probe && globals.downloader &&
-        globals.folder && globals.admin, '六支缓存脚本在画廊页可用');
+    ok(globals.store && globals.probe && globals.downloader &&
+        globals.folder && globals.admin, '五支缓存脚本在画廊页可用');
     ok(globals.noEngine, '画廊页仍未加载引擎（保持解耦）');
 
     // 存储位置：未绑定时应报告 opfs

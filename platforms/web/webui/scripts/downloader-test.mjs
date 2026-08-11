@@ -1,11 +1,11 @@
 // 下载器测试。
 //
 // 验证"边玩边下"真正要求的三件事：
-//   1. 能把整个源填满，且不重复下载已有区间（续传不从头再来）
-//   2. 引擎在等字节时会让路（预取抢带宽是"开了反而更卡"的根因）
-//   3. 停止/恢复不丢已下载的进度
+//   1. 冷下载整个资源只有一个 GET
+//   2. 停止后从连续前缀用一个 Range GET 续传
+//   3. 引擎在等字节时，边玩边下暂停消费后台流
 //
-// 与 byte-cache-test 一样，用自带计数的 Range 服务器直接数 HTTP 条数。
+// 与 byte-cache-test 一样，用自带计数的服务器直接数 HTTP 条数。
 
 import puppeteer from 'puppeteer-core';
 import { spawn } from 'node:child_process';
@@ -16,16 +16,23 @@ const FILE_PORT = 5196;
 const VITE = `http://localhost:${VITE_PORT}`;
 const FILE_URL = `http://localhost:${FILE_PORT}/big.bin`;
 
-// 32MiB / 2MiB 块 = 16 块。够大才停得到"中途"：8MiB 配 6 并发在测试
-// 叫停之前就已经下完，续传那一段根本测不到。同时也跨过了 cache-store
-// 的 16MiB 提交批次，顺带覆盖分批落盘。
+// 32MiB 跨过 cache-store 的 16MiB 提交批次，覆盖分批落盘。
 const SIZE = 32 * 1024 * 1024;
-const CHUNKS = 16;
 const BODY = Buffer.alloc(SIZE);
 for (let i = 0; i < SIZE; i++) BODY[i] = (i * 31 + 17) & 0xff;
 
 let rangeRequests = 0;
-let slowMs = 0;                          // 人为放慢，便于观察并发与让路
+let slowMs = 0;                          // 每 1MiB 的发送间隔
+
+async function sendBody(res, body) {
+    const step = 1024 * 1024;
+    for (let pos = 0; pos < body.length; pos += step) {
+        if (res.destroyed) return;
+        res.write(body.subarray(pos, Math.min(pos + step, body.length)));
+        if (slowMs) await new Promise((r) => setTimeout(r, slowMs));
+    }
+    res.end();
+}
 
 const fileServer = createServer(async (req, res) => {
     const cors = {
@@ -41,8 +48,6 @@ const fileServer = createServer(async (req, res) => {
         res.end();
         return;
     }
-    if (slowMs) await new Promise((r) => setTimeout(r, slowMs));
-
     const range = req.headers.range;
     if (range) {
         rangeRequests++;
@@ -56,12 +61,12 @@ const fileServer = createServer(async (req, res) => {
             'Content-Length': String(slice.length),
             'ETag': '"dl-test-v1"'
         });
-        res.end(slice);
+        await sendBody(res, slice);
         return;
     }
     rangeRequests++;
     res.writeHead(200, { ...cors, 'Content-Length': String(SIZE) });
-    res.end(BODY);
+    await sendBody(res, BODY);
 });
 
 await new Promise((r) => fileServer.listen(FILE_PORT, r));
@@ -107,10 +112,10 @@ try {
         full: window.KrKr2Downloader.CONCURRENCY_FULL,
         play: window.KrKr2Downloader.CONCURRENCY_PLAY
     }));
-    ok(concurrency.full === 6, `完整下载并发为 6（实际 ${concurrency.full}）`);
-    ok(concurrency.play === 3, `边玩边下并发为 3（实际 ${concurrency.play}）`);
+    ok(concurrency.full === 6, `JSON 多资源完整下载最多并发 6（实际 ${concurrency.full}）`);
+    ok(concurrency.play === 3, `JSON 多资源边玩边下最多并发 3（实际 ${concurrency.play}）`);
 
-    // --- 完整下载：应恰好取满全部块 ---
+    // --- 完整下载：整个资源一个普通 GET ---
     await page.evaluate(async () => {
         await window.KrKr2Cache.removeAll();
         await window.VLFS.init();
@@ -131,8 +136,7 @@ try {
 
     ok(full.state && full.state.done, '完整下载报告完成');
     ok(full.bytes === SIZE, `下满了全部字节（${full.bytes}/${SIZE}）`);
-    ok(rangeRequests === CHUNKS,
-        `请求数恰为块数，无重复下载（${rangeRequests} 条 / ${CHUNKS} 块）`);
+    ok(rangeRequests === 1, `完整资源只有一个 GET（实际 ${rangeRequests} 条）`);
 
     // 内容正确性：抽查三处
     const verify = await page.evaluate(async (url, size) => {
@@ -157,15 +161,14 @@ try {
         await window.KrKr2Cache.removeAll();
     });
     rangeRequests = 0;
-    slowMs = 300;      // 放慢，好在中途叫停
+    slowMs = 40;       // 放慢响应流，好在中途叫停
 
     const resumed = await page.evaluate(async (url) => {
         await window.KrKr2Cache.download({ gameKey: 'dltest', title: '下载测试', url });
         // 按固定时间叫停，不按 bytes 轮询：轮询到"有数据"时往往已经下完了
-        await new Promise((r) => setTimeout(r, 500));
+        await new Promise((r) => setTimeout(r, 260));
         const partial = window.KrKr2Cache.downloadState().bytes;
         window.KrKr2Cache.stopDownload();
-        await new Promise((r) => setTimeout(r, 300));
         return { partial };
     }, FILE_URL);
 
@@ -186,9 +189,8 @@ try {
     }, FILE_URL, SIZE);
 
     ok(finished.done && finished.bytes === SIZE, '续传后下载完成');
-    // 允许被 stop() 打断的在途块重下，但不该整份重来
-    ok(rangeRequests <= CHUNKS + concurrency.full,
-        `续传没有重下已有区间（总请求 ${rangeRequests} ≤ ${CHUNKS + concurrency.full}）`);
+    ok(rangeRequests === 2,
+        `首次 GET 加一次续传 Range，共 2 条请求（实际 ${rangeRequests}）`);
 
     // --- 让路：引擎在等字节时不调度新块 ---
     await page.evaluate(async () => { await window.KrKr2Cache.removeAll(); });
@@ -198,7 +200,9 @@ try {
     const yielded = await page.evaluate(async (url) => {
         // 先把按需读标记按住，再启动下载器
         window.VLFS._demandActive = 1;
-        await window.KrKr2Cache.download({ gameKey: 'dltest', title: '下载测试', url });
+        await window.KrKr2Cache.download({
+            gameKey: 'dltest', title: '下载测试', url, mode: 'play'
+        });
         const diag = {
             demandActive: window.VLFS._demandActive,
             busy: window.VLFS.demandBusy(500),

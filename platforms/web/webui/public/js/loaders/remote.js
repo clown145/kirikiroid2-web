@@ -56,9 +56,12 @@
         await window.KrKr2VLFS.ready;
 
         var probe = await probeRemoteRange(src.url);
+        var cache = probe.size > 0 ? await openGameCache(src, src.url, probe) : null;
 
-        if (probe.ranges && probe.size > 0) {
-            var cache = await openGameCache(src, src.url, probe);
+        if (cache && cache.complete()) {
+            VLFS.registerRemote('/data.xp3', src.url, probe.size, true, cache);
+            console.log('[vlfs] local cached xp3: ' + probe.size + ' bytes');
+        } else if (probe.ranges && probe.size > 0) {
             VLFS.registerRemote('/data.xp3', src.url, probe.size, true, cache);
             console.log('[vlfs] remote xp3 (Range lazy-load): ' + src.url + ', ' + probe.size + ' bytes');
         } else {
@@ -87,11 +90,23 @@
         await window.KrKr2VLFS.ready;
 
         var probe = await probeRemoteRange(src.url);
+        var cache = probe.size > 0 ? await openGameCache(src, src.url, probe) : null;
 
         var reg;
-        if (probe.ranges && probe.size > 0) {
+        if (cache && cache.complete()) {
+            report(hooks, 0, 'Reading cached archive...');
+            reg = await VLFS.registerZipRemote(src.url, probe.size, {
+                fingerprint: probe.fingerprint || undefined,
+                cache: cache,
+                gameKey: src.gameKey || null,
+                onProgress: function (done, total, path) {
+                    report(hooks, Math.round(done / total * 100),
+                        'Extracting (' + done + '/' + total + ') ' + path.substring(1));
+                }
+            });
+            console.log('[vlfs] local cached zip: ' + probe.size + ' bytes');
+        } else if (probe.ranges && probe.size > 0) {
             report(hooks, 0, 'Reading archive index...');
-            var cache = await openGameCache(src, src.url, probe);
             reg = await VLFS.registerZipRemote(src.url, probe.size, {
                 fingerprint: probe.fingerprint || undefined,
                 cache: cache,
@@ -136,39 +151,65 @@
         report(hooks, 0, 'Fetching game manifest...');
         await window.KrKr2VLFS.ready;
 
-        var res = await fetch(src.url);
-        if (!res.ok) throw new Error('Failed to fetch manifest: ' + res.status);
-        var manifest = await res.json();
-        
+        var loaded = await window.KrKr2SourceProbe.loadManifest({
+            gameKey: src.gameKey,
+            title: src.title,
+            url: src.url
+        });
+        var manifest = loaded.manifest;
         var xp3Paths = [];
         var totalFiles = manifest.length;
-        
+        var preparedItems = [];
+        var seen = new Set();
+
         for (var i = 0; i < totalFiles; i++) {
             var item = manifest[i];
-            if (!item.name || !item.url) continue;
-            
-            report(hooks, Math.round((i / totalFiles) * 100), 'Mounting ' + item.name + '...');
-            
-            // 规范化路径名，必须以 '/' 开头
-            var path = item.name.startsWith('/') ? item.name : ('/' + item.name);
-            
-            // 如果 JSON 中没提供 size，则探测获取
-            var size = item.size;
-            if (typeof size !== 'number' || size <= 0) {
-                var probe = await probeRemoteRange(item.url);
-                size = probe.size;
+            var prepared = await window.KrKr2SourceProbe.prepareManifestItem(
+                item, src.url, loaded.probe);
+            if (!prepared) continue;
+            if (seen.has(prepared.resourceKey)) {
+                throw new Error('Game manifest contains duplicate path: ' + prepared.path);
             }
-            
-            if (size > 0) {
-                VLFS.registerRemote(path, item.url, size, true);
-                if (path.toLowerCase().endsWith('.xp3')) {
-                    xp3Paths.push(path);
+            seen.add(prepared.resourceKey);
+            preparedItems.push(prepared);
+        }
+
+        if (src.gameKey) {
+            await window.KrKr2SourceProbe.retainGameResources(
+                src.gameKey,
+                [window.KrKr2SourceProbe.MANIFEST_RESOURCE_KEY].concat(
+                    preparedItems.map(function (item) { return item.resourceKey; })));
+        }
+
+        for (var pi = 0; pi < preparedItems.length; pi++) {
+            var prepared = preparedItems[pi];
+
+            report(hooks, Math.round((pi / preparedItems.length) * 100),
+                'Mounting ' + prepared.path.substring(1) + '...');
+
+            if (prepared.size > 0) {
+                var cache = null;
+                if (src.gameKey) {
+                    cache = await window.KrKr2SourceProbe.openGameCache({
+                        gameKey: src.gameKey,
+                        title: src.title,
+                        url: prepared.url,
+                        probe: prepared.probe,
+                        resourceKey: prepared.resourceKey,
+                        resourcePath: prepared.path
+                    });
+                }
+                VLFS.registerRemote(prepared.path, prepared.url, prepared.size,
+                    prepared.probe.ranges, cache);
+                if (prepared.path.toLowerCase().endsWith('.xp3')) {
+                    xp3Paths.push(prepared.path);
                 }
             } else {
-                console.warn('[vlfs] Skip mounting ' + item.name + ': could not determine size');
+                console.warn('[vlfs] Skip mounting ' + prepared.path +
+                    ': could not determine size');
             }
         }
-        
+
         console.log('[vlfs] json manifest registered: ' + totalFiles + ' entries, ' + xp3Paths.length + ' xp3');
         report(hooks, 100, 'Starting game...');
         

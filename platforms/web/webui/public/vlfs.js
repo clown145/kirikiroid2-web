@@ -379,13 +379,19 @@
 
         /**
          * cache：可选的 KrKr2CacheStore GameCache。挂上之后本 entry 的
-         * 远程读先查缓存、未命中再走网络并回填。null 即纯按需网络读。
+         * 远程读先查连续前缀、未命中再走临时网络 Range。随机读取只保留在
+         * 本页面的块 LRU 中，不写成持久化空洞。null 即纯按需网络读。
          */
         registerRemote(path, url, size, supportsRanges, cache) {
+            var locallyComplete = cache && typeof cache.isComplete === 'function' &&
+                cache.isComplete(size);
             return this._register(path, {
-                kind: supportsRanges ? 'remote' : 'blob',
+                // 不支持 Range 的源在完整下载后也能直接从连续本地文件读；
+                // 未完成时仍走整包 Blob，避免一次逻辑读取触发多次全量 GET。
+                kind: supportsRanges || locallyComplete ? 'remote' : 'blob',
                 size: size, url: url, blob: null,
-                cache: cache || null
+                cache: cache || null,
+                supportsRanges: !!supportsRanges
             });
         },
 
@@ -806,9 +812,6 @@
                     throw new Error('short range: ' + rbuf.byteLength + ' < ' + len);
                 out = new Uint8Array(rbuf, 0, Math.min(len, rbuf.byteLength)).slice();
             }
-            if (target.cache && out.length) {
-                try { target.cache.put(pos, out); } catch (e) {}
-            }
             return out;
         },
 
@@ -979,22 +982,39 @@
         /**
          * 当前挂载的字节缓存（连同它对应的源地址与大小）。
          *
-         * 边玩边下必须复用这个对象，不能自己再 open 一次 —— CacheStore.open
-         * 会把同一 gameKey 的旧实例 retire 掉，那正是 VLFS 读路径在用的那个。
+         * 边玩边下必须复用这些对象，不能自己再 open 一次 —— CacheStore.open
+         * 会把同一 gameKey/resourceKey 的旧实例 retire 掉，而旧对象正被
+         * VLFS 读路径使用。
          */
-        activeCache() {
+        activeCaches() {
+            var out = [];
+            var seen = new Set();
             for (var pair of this._entries) {
                 var e = pair[1];
-                if (e.cache) return { cache: e.cache, url: e.url, size: e.size };
+                if (e.cache && !seen.has(e.cache)) {
+                    seen.add(e.cache);
+                    out.push({
+                        cache: e.cache, url: e.url, size: e.size,
+                        ranges: e.supportsRanges !== false
+                    });
+                }
                 if (e.zipSource && e.zipSource.cache) {
-                    return {
-                        cache: e.zipSource.cache,
-                        url: e.zipSource.url,
-                        size: e.zipSource.size
-                    };
+                    if (!seen.has(e.zipSource.cache)) {
+                        seen.add(e.zipSource.cache);
+                        out.push({
+                            cache: e.zipSource.cache,
+                            url: e.zipSource.url,
+                            size: e.zipSource.size,
+                            ranges: e.zipSource.supportsRanges !== false
+                        });
+                    }
                 }
             }
-            return null;
+            return out;
+        },
+
+        activeCache() {
+            return this.activeCaches()[0] || null;
         },
 
         /**
@@ -1011,17 +1031,26 @@
         stats() {
             // 各来源的读次数。cacheHit / network 的比值是预加载是否生效的
             // 直接指标：命中率上升、network 单调下降才说明缓存在起作用。
-            var active = this.activeCache();
+            var active = this.activeCaches();
             var cached = null;
-            if (active) {
-                var c = active.cache;
+            if (active.length) {
+                var bytes = 0, size = 0, segments = 0, done = true;
+                for (var i = 0; i < active.length; i++) {
+                    var c = active[i].cache;
+                    bytes += c.availableBytes();
+                    size += active[i].size;
+                    segments += typeof c.segmentCount === 'function'
+                        ? c.segmentCount() : 0;
+                    done = done && c.isComplete(active[i].size);
+                }
                 cached = {
-                    gameKey: c.gameKey,
-                    bytes: c.availableBytes(),
-                    size: c.size,
-                    pct: c.size ? Math.min(100, Math.round(c.availableBytes() / c.size * 100)) : 0,
-                    segments: c.ranges.count(),
-                    done: c.isComplete(c.size)
+                    gameKey: active[0].cache.gameKey,
+                    bytes: bytes,
+                    size: size,
+                    pct: size ? Math.min(100, Math.round(bytes / size * 100)) : 0,
+                    segments: segments,
+                    resources: active.length,
+                    done: done
                 };
             }
             return {

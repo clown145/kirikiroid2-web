@@ -56,9 +56,10 @@ const busy = computed(() => phase.value !== 'running' && !errorInfo.value && !fa
 const engineBase = () => (window.KrKr2Config?.engineBase) ||
                          (window.KrKr2Config?.assetBase) || '/';
 
-function exitToGallery() {
+async function exitToGallery() {
     // 整页跳转，不是路由切换：引擎是硬单例，必须靠 Document 销毁
     // 才能释放 Web Lock 和 wasm runtime。
+    await window.KrKr2Cache?.stopDownload();
     location.href = '/';
 }
 
@@ -132,9 +133,9 @@ function onContextLost(e) {
 
 /** 把 downloadUrl 的后缀映射成加载器类型。 */
 function sourceTypeFor(url) {
-    const u = url.trim().toLowerCase();
-    if (u.endsWith('.json') || u.includes('.json?')) return 'json-url';
-    if (u.endsWith('.xp3') || u.includes('.xp3?')) return 'xp3-url';
+    const path = url.trim().toLowerCase().split(/[?#]/)[0];
+    if (path.endsWith('.json')) return 'json-url';
+    if (path.endsWith('.xp3')) return 'xp3-url';
     return 'zip-url';
 }
 
@@ -254,7 +255,7 @@ onUnmounted(() => {
     resizeObserver?.disconnect();
     window.removeEventListener('resize', updateCanvasSize);
     if (cachePoll) clearInterval(cachePoll);
-    // 停止时把未落盘的进度写回去，下次从洞继续
+    // 直接关闭页面时尽力提交；应用内退出会在跳转前 await 提交。
     window.KrKr2Cache?.stopDownload();
 });
 </script>

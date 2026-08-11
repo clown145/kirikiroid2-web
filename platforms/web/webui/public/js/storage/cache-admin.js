@@ -5,7 +5,7 @@
  * 也就没有 VLFS 实例。这里只依赖 OPFS 本身。
  *
  * 一个游戏的缓存分布在两处，清理必须同时覆盖：
- *   krkr2-cache/<dir>/        字节区间缓存（cache-store.js 写）
+ *   krkr2-cache/<游戏目录>/  连续资源文件（cache-store.js 写）
  *   vlfs-tmp/zip-cache-<fp>/  ZIP deflate 条目的解压产物（vlfs.js 写）
  * 后者的 state 结构是与 vlfs.js 的约定，改那边记得同步改这里。
  */
@@ -127,31 +127,104 @@
     // 一次只跑一个下载：并行下两个游戏只会让两个都变慢，且抢光连接。
     // 画廊页与播放页各自持有自己的实例 —— MPA 下它们是两个 Document，
     // 本来就不共享状态，跳转即中断也正是既定行为（进度留在 OPFS，
-    // 下次从洞继续，不会从头再来）。
+    // 下次从连续前缀继续，不会从头再来）。
     var active = null;        // {gameKey, title, downloader, cache}
 
+    function sourceTypeForUrl(url) {
+        var value = String(url || '').trim().toLowerCase();
+        var path = value.split(/[?#]/)[0];
+        return path.endsWith('.json') ? 'json-url' : 'single-url';
+    }
+
+    async function prepareManifestDownload(info) {
+        var loaded = await window.KrKr2SourceProbe.loadManifest({
+            gameKey: info.gameKey,
+            title: info.title,
+            url: info.url
+        });
+        var sources = [];
+        var preparedItems = [];
+        var seen = new Set();
+
+        for (var i = 0; i < loaded.manifest.length; i++) {
+            var prepared = await window.KrKr2SourceProbe.prepareManifestItem(
+                loaded.manifest[i], info.url, loaded.probe);
+            if (!prepared) continue;
+            if (seen.has(prepared.resourceKey)) {
+                throw new Error('JSON 清单包含重复路径：' + prepared.path);
+            }
+            seen.add(prepared.resourceKey);
+            if (!(prepared.size > 0)) throw new Error('无法确定资源大小：' + prepared.path);
+            preparedItems.push(prepared);
+        }
+
+        await window.KrKr2SourceProbe.retainGameResources(
+            info.gameKey,
+            [window.KrKr2SourceProbe.MANIFEST_RESOURCE_KEY].concat(
+                preparedItems.map(function (item) { return item.resourceKey; })));
+
+        for (var pi = 0; pi < preparedItems.length; pi++) {
+            var prepared = preparedItems[pi];
+            var cache = await window.KrKr2SourceProbe.openGameCache({
+                gameKey: info.gameKey,
+                title: info.title,
+                url: prepared.url,
+                probe: prepared.probe,
+                resourceKey: prepared.resourceKey,
+                resourcePath: prepared.path
+            });
+            if (!cache) throw new Error('无法创建资源缓存：' + prepared.path);
+            sources.push({
+                url: prepared.url,
+                size: prepared.size,
+                cache: cache,
+                path: prepared.path,
+                ranges: prepared.probe.ranges
+            });
+        }
+
+        return {
+            sources: sources,
+            fixedBytes: loaded.cache ? loaded.cache.availableBytes() : loaded.bytes,
+            fixedSize: loaded.probe.size > 0 ? loaded.probe.size : 0,
+            cache: loaded.cache || (sources[0] && sources[0].cache) || null
+        };
+    }
+
     async function startDownload(info) {
-        stopDownload();
+        await stopDownload();
         if (!window.KrKr2SourceProbe || !window.KrKr2Downloader) {
             throw new Error('下载器未加载');
         }
 
-        var probe = await window.KrKr2SourceProbe.probe(info.url);
-        if (!probe.ranges || !(probe.size > 0)) {
-            // 不支持 Range 就没法分块填洞，也没法断点续传
-            throw new Error('该地址不支持分段下载，无法预下载');
+        var type = info.type || sourceTypeForUrl(info.url);
+        var prepared;
+        if (type === 'json-url') {
+            prepared = await prepareManifestDownload(info);
+        } else {
+            var probe = await window.KrKr2SourceProbe.probe(info.url);
+            if (!(probe.size > 0)) throw new Error('无法确定资源大小，无法下载');
+            var cache = await window.KrKr2SourceProbe.openGameCache({
+                gameKey: info.gameKey, title: info.title,
+                url: info.url, probe: probe
+            });
+            if (!cache) throw new Error('缓存不可用，无法预下载');
+            prepared = {
+                sources: [{
+                    url: info.url, size: probe.size, cache: cache,
+                    ranges: probe.ranges
+                }],
+                fixedBytes: 0,
+                fixedSize: 0,
+                cache: cache
+            };
         }
-
-        var cache = await window.KrKr2SourceProbe.openGameCache({
-            gameKey: info.gameKey, title: info.title,
-            url: info.url, probe: probe
-        });
-        if (!cache) throw new Error('缓存不可用，无法预下载');
 
         var dl = window.KrKr2Downloader.create({
             url: info.url,
-            size: probe.size,
-            cache: cache,
+            sources: prepared.sources,
+            fixedBytes: prepared.fixedBytes,
+            fixedSize: prepared.fixedSize,
             mode: info.mode || 'full',
             onProgress: info.onProgress,
             onDone: function (s) {
@@ -161,7 +234,7 @@
         });
         active = {
             gameKey: info.gameKey, title: info.title || '',
-            downloader: dl, cache: cache
+            downloader: dl, cache: prepared.cache
         };
         dl.start();
         return dl;
@@ -171,37 +244,43 @@
      * 对当前正在游玩的源开启边玩边下。
      *
      * 复用 VLFS 已挂载的 GameCache，而不是自己再 open 一次：CacheStore.open
-     * 会 retire 同一 gameKey 的旧实例，那正是读路径正在用的那个，重开会让
-     * 已缓存的区间凭空消失。
+     * 会 retire 同一 gameKey/resourceKey 的旧实例，那正是读路径正在用的
+     * 对象，重开会让尚未提交的连续前缀凭空消失。
      */
     function startPlayDownload(handlers) {
-        if (!window.VLFS || typeof window.VLFS.activeCache !== 'function') return null;
-        var a = window.VLFS.activeCache();
-        if (!a || !a.cache || !a.url || !(a.size > 0)) return null;
-        if (a.cache.isComplete(a.size)) return null;   // 已经全在本地了
+        if (!window.VLFS || typeof window.VLFS.activeCaches !== 'function') return null;
+        var sources = window.VLFS.activeCaches().filter(function (source) {
+            return source && source.cache && source.url && source.size > 0;
+        });
+        if (!sources.length) return null;
+        var incomplete = sources.some(function (source) {
+            return !source.cache.isComplete(source.size);
+        });
+        if (!incomplete) return null;   // 已经全在本地了
 
         stopDownload();
         var dl = window.KrKr2Downloader.create({
-            url: a.url,
-            size: a.size,
-            cache: a.cache,
+            url: sources[0].url,
+            sources: sources,
             mode: 'play',
             onProgress: handlers && handlers.onProgress,
             onDone: handlers && handlers.onDone,
             onError: handlers && handlers.onError
         });
         active = {
-            gameKey: a.cache.gameKey, title: '',
-            downloader: dl, cache: a.cache
+            gameKey: sources[0].cache.gameKey, title: '',
+            downloader: dl, cache: sources[0].cache
         };
         dl.start();
         return dl;
     }
 
     function stopDownload(opts) {
-        if (!active) return;
-        try { active.downloader.stop(opts); } catch (e) {}
+        if (!active) return Promise.resolve();
+        var current = active;
         active = null;
+        try { return current.downloader.stop(opts) || Promise.resolve(); }
+        catch (e) { return Promise.resolve(); }
     }
 
     function downloadState() {
@@ -231,18 +310,20 @@
             return base;
         },
 
-        /** 清理单个游戏的全部缓存（字节区间 + ZIP 解压产物）。 */
+        /** 清理单个游戏的全部缓存（连续资源文件 + ZIP 解压产物）。 */
         async remove(gameKey) {
             // 正在下载它就先停，且丢弃未落盘的那批 —— 保存它没有意义，
             // 数据下一步就要被删
-            if (active && active.gameKey === gameKey) stopDownload({ discard: true });
+            if (active && active.gameKey === gameKey) {
+                await stopDownload({ discard: true });
+            }
             var s = await store();
             if (s) await s.remove(gameKey);
             await removeZipCacheFor(gameKey);
         },
 
         async removeAll() {
-            stopDownload({ discard: true });
+            await stopDownload({ discard: true });
             var s = await store();
             if (s) await s.removeAll();
             var dir = await zipCacheDir();
@@ -298,18 +379,22 @@
         /** 绑定文件夹。必须在用户手势里调用。 */
         async bindFolder() {
             if (!window.KrKr2Folder) throw new Error('不支持选择文件夹');
+            // 活跃响应已经绑定旧后端的 GameCache；先停止并提交连续前缀，
+            // 下一次下载再从新后端开始，避免一个响应跨两个目录写。
+            await stopDownload();
             var handle = await window.KrKr2Folder.request();
             return handle ? handle.name : '';
         },
 
         async unbindFolder() {
-            stopDownload({ discard: true });
+            await stopDownload();
             await window.KrKr2Folder?.unbind();
         },
 
         /**
          * 启动预下载。同一时刻只跑一个，调用它会先停掉上一个。
-         * mode 'full'（画廊页完整下载，并发 6）或 'play'（边玩边下，并发 3）。
+         * mode 'full'（画廊页）或 'play'（边玩边下）。并发数只控制 JSON
+         * 多资源间的并行度；每个资源始终只有一个连续 GET。
          */
         download: startDownload,
         startPlayDownload: startPlayDownload,

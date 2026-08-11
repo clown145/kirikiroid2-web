@@ -6,8 +6,8 @@
  * 清一次浏览数据也照样没。几个 GB 的游戏包放在那里并不安全。
  *
  * 绑定之后数据就是磁盘上的普通文件，浏览器永远不会自动删，用户能直接
- * 看到、拷走、备份。而且下载到 100% 时那个文件**就是**完整可用的原始
- * .zip/.xp3 —— 因为 cache-store 用的是「offset 直接对应源文件」的稀疏文件。
+ * 看到、拷走、备份。每个游戏按标题建立目录，JSON 资源恢复清单中的相对
+ * 路径；ZIP/XP3 下载完成后就是原始文件。
  *
  * 句柄存 IndexedDB（结构化克隆能存 FileSystemDirectoryHandle），下次进站
  * 用 queryPermission/requestPermission 恢复。Chromium 会记住用户的授权，

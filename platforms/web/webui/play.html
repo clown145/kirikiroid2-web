@@ -26,15 +26,13 @@
          这几支脚本与产品前端解耦（见 js/engine/engine.js 的设计说明），
          Vue 侧只通过 window.KrKr2Engine 消费。 -->
     <script src="/js/vendor/jszip.min.js"></script>
-    <!-- 字节缓存：range-set 必须在 cache-store 之前 —— 后者在 IIFE 顶部
-         就取 window.KrKr2RangeSet，晚加载会拿到 undefined。 -->
-    <script src="/js/storage/range-set.js"></script>
+    <!-- 连续前缀缓存与下载。 -->
     <script src="/js/storage/cache-store.js"></script>
     <script src="/js/storage/folder-binding.js"></script>
     <script src="/js/storage/source-probe.js"></script>
     <script src="/js/storage/downloader.js"></script>
     <script src="/js/storage/cache-admin.js"></script>
-    <script src="/vlfs.js?v=byte-cache-v1"></script>
+    <script src="/vlfs.js?v=prefix-cache-v2"></script>
 
     <!-- 构建注入的配置；源码树直接开页面时 build-config.js 404，
          classic script 的 404 只报错不中断解析，随后的 config.js 填开发默认值。 -->
