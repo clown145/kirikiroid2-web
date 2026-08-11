@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <exception>
@@ -72,24 +73,29 @@ EM_JS(void, TVPWebPrefetchWriteTrace,
           console.log(line);
       });
 
-// emscripten_async_call 通过普通 wasm table 回调进入 C++，不具备 JSPI 的
-// promising 上下文；场景前瞻首次 VLFS 未命中会直接抛 SuspendError。调度入口
-// 经 promising 包装；二进制资源本身走 ReadAsync，不在同步 C++ 栈上挂起。
-EM_JS(void, TVPWebPrefetchSchedule,
-      (uintptr_t callback, void *arg, int delayMs), {
-          var wrappers = globalThis.__KRKR2_PREFETCH_CALLBACKS__ ||
-              (globalThis.__KRKR2_PREFETCH_CALLBACKS__ = new Map());
-          var wrapped = wrappers.get(callback);
-          if(!wrapped) {
-              wrapped = WebAssembly.promising(wasmTable.get(callback));
-              wrappers.set(callback, wrapped);
-          }
-          setTimeout(function() {
-              wrapped(arg).catch(function(error) {
-                  console.error('[prefetch] callback failed:', error);
-              });
-          }, Math.max(0, delayMs));
-      });
+// 学习型前瞻清单由 WebUI 异步读入 OPFS，这里只读取已落到
+// Module 内存的结果。这两个桥接不等待 Promise，因而可以在正常 KAG
+// 执行中安全调用。
+EM_JS(int, TVPWebPrefetchLearnedReady, (), {
+    var module = typeof Module !== 'undefined' ? Module :
+        (typeof globalThis !== 'undefined' ? globalThis.Module : null);
+    return module && module._webPrefetchLearnedReady === true ? 1 : 0;
+});
+
+EM_JS(char *, TVPWebPrefetchGetLearnedPath, (int index), {
+    var module = typeof Module !== 'undefined' ? Module :
+        (typeof globalThis !== 'undefined' ? globalThis.Module : null);
+    var paths = module && module._webPrefetchLearnedPaths;
+    if(!Array.isArray(paths) || index < 0 || index >= paths.length)
+        return 0;
+    var path = typeof paths[index] === 'string' ? paths[index] : '';
+    if(!path)
+        return 0;
+    var size = lengthBytesUTF8(path) + 1;
+    var result = _malloc(size);
+    stringToUTF8(path, result, size);
+    return result;
+});
 #endif
 
 namespace TJS {
@@ -356,7 +362,7 @@ namespace {
     constexpr size_t TVP_WEB_PREFETCH_SCENARIO_QUEUE_LIMIT = 64;
     constexpr int TVP_WEB_PREFETCH_SCENARIO_DEPTH_LIMIT = 8;
     constexpr tjs_uint TVP_WEB_PREFETCH_READ_SIZE = 256 * 1024;
-    constexpr int TVP_WEB_PREFETCH_YIELD_MS = 8;
+    constexpr int TVP_WEB_PREFETCH_LEARNED_PATH_LIMIT = 192;
 
     int TVPWebPrefetchEnabledState = -1;
     int TVPWebPrefetchTraceState = -1;
@@ -418,7 +424,9 @@ namespace {
     std::deque<tTVPWebScenarioPrefetchTask> TVPWebScenarioPrefetchQueue;
     std::set<ttstr> TVPWebBinaryPrefetchSeen;
     std::set<ttstr> TVPWebGraphicPrefetchSeen;
-    std::set<std::pair<ttstr, ttstr>> TVPWebScenarioPrefetchSeen;
+    std::set<std::pair<ttstr, ttstr>> TVPWebScenarioPrefetchQueued;
+    std::set<std::pair<ttstr, ttstr>> TVPWebScenarioPrefetchInFlight;
+    std::set<std::pair<ttstr, ttstr>> TVPWebScenarioPrefetchCompleted;
 
     enum class tTVPWebStreamPrefetchKind { Graphic, Binary };
 
@@ -440,11 +448,28 @@ namespace {
     using tTVPWebStreamPrefetchTaskPtr =
         std::shared_ptr<tTVPWebStreamPrefetchTask>;
 
+    struct tTVPWebScenarioPrefetchStreamTask {
+        tTVPWebScenarioPrefetchTask Task;
+        std::unique_ptr<tTJSBinaryStream> Stream;
+        std::vector<tjs_uint8> Buffer;
+        tjs_uint64 BytesRead = 0;
+        double StartedAt = 0;
+
+        explicit tTVPWebScenarioPrefetchStreamTask(
+            const tTVPWebScenarioPrefetchTask &task) :
+            Task(task), Buffer(TVP_WEB_PREFETCH_READ_SIZE) {}
+    };
+
+    using tTVPWebScenarioPrefetchStreamTaskPtr =
+        std::shared_ptr<tTVPWebScenarioPrefetchStreamTask>;
+
     tTVPWebStreamPrefetchTaskPtr TVPWebGraphicPrefetchTask;
     tTVPWebStreamPrefetchTaskPtr TVPWebBinaryPrefetchTask;
+    tTVPWebScenarioPrefetchStreamTaskPtr TVPWebScenarioPrefetchActiveTask;
     bool TVPWebGraphicPrefetchScheduled = false;
     bool TVPWebBinaryPrefetchScheduled = false;
     bool TVPWebScenarioPrefetchScheduled = false;
+    bool TVPWebPrefetchLearnedImported = false;
     bool TVPWebPrefetchDisabledLogged = false;
 
     bool TVPWebPrefetchIsSpace(tjs_char ch) {
@@ -621,9 +646,15 @@ namespace {
     }
 
     void TVPWebPrefetchScheduleTask(void (*callback)(void *), void *arg) {
-        TVPWebPrefetchSchedule(
-            reinterpret_cast<uintptr_t>(callback), arg,
-            TVP_WEB_PREFETCH_YIELD_MS);
+        // ProcessMessages() 帧首只消费进入本帧前已存在的消息；处理中
+        // 新投递的续体会自然让到下一帧。主循环是 JSPI promising
+        // export，因此消息回调中的同步快路也处于合法挂起上下文。
+        if(Application) {
+            Application->PostUserMessage(
+                [callback, arg]() { callback(arg); });
+        } else {
+            emscripten_async_call(callback, arg, 0);
+        }
     }
 
     bool TVPWebPrefetchNameIn(const ttstr &name,
@@ -674,12 +705,13 @@ namespace {
 
     tTVPWebPrefetchKind TVPClassifyWebPrefetchValue(const ttstr &value) {
         static const char *const graphicExts[] = {
-            ".png", ".jpg", ".jpeg", ".bmp", ".tlg", ".webp",
-            ".jxr", ".pvr", ".bpg"
+            ".png", ".jpg", ".jpeg", ".jif", ".bmp", ".dib",
+            ".tlg", ".tlg5", ".tlg6", ".webp", ".jxr", ".pvr",
+            ".bpg", ".pimg", ".psb", ".mtn"
         };
         static const char *const binaryExts[] = {
             ".wav", ".ogg", ".mp3", ".m4a", ".opus", ".aac",
-            ".flac", ".mid", ".midi"
+            ".flac", ".mid", ".midi", ".wma", ".mp4", ".webm"
         };
 
         std::string storage = TVPKAGTraceLower(value.AsStdString());
@@ -982,6 +1014,54 @@ namespace {
         return true;
     }
 
+    void TVPImportWebLearnedPrefetch() {
+        if(TVPWebPrefetchLearnedImported || !TVPWebPrefetchEnabled() ||
+           !TVPWebPrefetchLearnedReady())
+            return;
+
+        TVPWebPrefetchLearnedImported = true;
+        size_t graphics = 0;
+        size_t binary = 0;
+        size_t skipped = 0;
+        for(int index = 0;
+            index < TVP_WEB_PREFETCH_LEARNED_PATH_LIMIT; ++index) {
+            char *raw = TVPWebPrefetchGetLearnedPath(index);
+            if(!raw)
+                break;
+            ttstr storage(raw);
+            std::free(raw);
+            if(storage.IsEmpty()) {
+                ++skipped;
+                continue;
+            }
+
+            switch(TVPClassifyWebPrefetchValue(storage)) {
+                case tTVPWebPrefetchKind::Graphic:
+                    if(TVPQueueWebGraphicPrefetch(storage, TJS_W("learned"),
+                                                  -1))
+                        ++graphics;
+                    else
+                        ++skipped;
+                    break;
+                case tTVPWebPrefetchKind::Binary:
+                    if(TVPQueueWebBinaryPrefetch(storage, TJS_W("learned"),
+                                                 TJS_W("learned"), -1))
+                        ++binary;
+                    else
+                        ++skipped;
+                    break;
+                case tTVPWebPrefetchKind::None:
+                    ++skipped;
+                    break;
+            }
+        }
+
+        TVPWebPrefetchTrace(
+            "learned-import graphics=" + std::to_string(graphics) +
+            " binary=" + std::to_string(binary) +
+            " skipped=" + std::to_string(skipped));
+    }
+
     void TVPProcessWebScenarioPrefetch(void *);
 
     bool TVPQueueWebScenarioPrefetch(const ttstr &sourceStorage,
@@ -1009,8 +1089,12 @@ namespace {
         }
 
         const std::pair<ttstr, ttstr> key(storage, target);
-        if(TVPWebScenarioPrefetchSeen.find(key) !=
-           TVPWebScenarioPrefetchSeen.end())
+        if(TVPWebScenarioPrefetchQueued.find(key) !=
+               TVPWebScenarioPrefetchQueued.end() ||
+           TVPWebScenarioPrefetchInFlight.find(key) !=
+               TVPWebScenarioPrefetchInFlight.end() ||
+           TVPWebScenarioPrefetchCompleted.find(key) !=
+               TVPWebScenarioPrefetchCompleted.end())
             return false;
         if(TVPWebScenarioPrefetchQueue.size() >=
            TVP_WEB_PREFETCH_SCENARIO_QUEUE_LIMIT) {
@@ -1021,7 +1105,7 @@ namespace {
             return false;
         }
 
-        TVPWebScenarioPrefetchSeen.insert(key);
+        TVPWebScenarioPrefetchQueued.insert(key);
         TVPWebScenarioPrefetchQueue.push_back({storage, target, depth});
         TVPWebPrefetchTrace(
             "control-follow from='" + TVPKAGTraceNarrow(sourceStorage) +
@@ -1196,47 +1280,67 @@ namespace {
         return result;
     }
 
-    void TVPProcessWebScenarioPrefetch(void *) {
-        if(TVPWebScenarioPrefetchQueue.empty()) {
-            TVPWebScenarioPrefetchScheduled = false;
+    void TVPFinishWebScenarioPrefetch(
+        const tTVPWebScenarioPrefetchStreamTaskPtr &task, bool completed,
+        const char *status, const std::string &detail = {}) {
+        if(!task || TVPWebScenarioPrefetchActiveTask.get() != task.get())
             return;
-        }
 
-        const tTVPWebScenarioPrefetchTask task =
-            TVPWebScenarioPrefetchQueue.front();
-        TVPWebScenarioPrefetchQueue.pop_front();
+        const std::pair<ttstr, ttstr> key(task->Task.Storage,
+                                         task->Task.Target);
+        TVPWebScenarioPrefetchInFlight.erase(key);
+        if(completed)
+            TVPWebScenarioPrefetchCompleted.insert(key);
+
+        const double elapsed = task->StartedAt > 0
+            ? emscripten_get_now() - task->StartedAt
+            : 0;
+        TVPWebPrefetchTrace(
+            std::string("scenario-") + (status ? status : "done") +
+                " storage='" + TVPKAGTraceNarrow(task->Task.Storage) +
+                "' target='" + TVPKAGTraceNarrow(task->Task.Target) +
+                "' bytes=" + std::to_string(task->BytesRead) +
+                " elapsedMs=" + std::to_string(elapsed) +
+                (detail.empty() ? std::string()
+                                : " error='" + detail + "'"),
+            true);
+        TVPWebScenarioPrefetchActiveTask.reset();
+    }
+
+    void TVPScanWarmedWebScenario(
+        const tTVPWebScenarioPrefetchStreamTaskPtr &task) {
+        if(!task || TVPWebScenarioPrefetchActiveTask.get() != task.get())
+            return;
+
         tTVPScenarioCacheItem *scenario = nullptr;
+        bool completed = false;
+        bool shouldScan = true;
+        std::string error;
         try {
-            TVPWebPrefetchTrace(
-                "scenario-start storage='" +
-                TVPKAGTraceNarrow(task.Storage) + "' target='" +
-                TVPKAGTraceNarrow(task.Target) + "' depth=" +
-                std::to_string(task.Depth));
-            scenario = TVPGetScenario(task.Storage, false);
             tjs_int start = 0;
-            if(!task.Target.IsEmpty()) {
+            scenario = TVPGetScenario(task->Task.Storage, false);
+            if(!task->Task.Target.IsEmpty()) {
                 scenario->EnsureLabelCache();
                 const tTVPScenarioCacheItem::tLabelCacheData *label =
-                    scenario->GetLabelCache().Find(task.Target);
+                    scenario->GetLabelCache().Find(task->Task.Target);
                 if(!label) {
                     TVPWebPrefetchTrace(
-                        "scenario-failed label-not-found storage='" +
-                        TVPKAGTraceNarrow(task.Storage) + "' target='" +
-                        TVPKAGTraceNarrow(task.Target) + "'");
-                    scenario->Release();
-                    scenario = nullptr;
+                        "scenario-scan label-not-found storage='" +
+                        TVPKAGTraceNarrow(task->Task.Storage) + "' target='" +
+                        TVPKAGTraceNarrow(task->Task.Target) + "'");
+                    shouldScan = false;
                 } else {
                     start = label->Line;
                 }
             }
-            if(scenario) {
+            if(scenario && shouldScan) {
                 const tTVPWebScenarioScanResult result =
-                    TVPScanWebScenario(
-                        task.Storage, scenario, start, task.Depth);
+                    TVPScanWebScenario(task->Task.Storage, scenario, start,
+                                       task->Task.Depth);
                 TVPWebPrefetchTrace(
                     "scenario-scan storage='" +
-                        TVPKAGTraceNarrow(task.Storage) + "' target='" +
-                        TVPKAGTraceNarrow(task.Target) + "' lines=" +
+                        TVPKAGTraceNarrow(task->Task.Storage) + "' target='" +
+                        TVPKAGTraceNarrow(task->Task.Target) + "' lines=" +
                         std::to_string(start) + "-" +
                         std::to_string(result.ThroughLine) + " waits=" +
                         std::to_string(result.Waits) + " graphics=" +
@@ -1248,19 +1352,103 @@ namespace {
                         result.StopReason + " tags='" +
                         TVPWebPrefetchFormatTagShapes(result) + "'",
                     true);
-                scenario->Release();
-                scenario = nullptr;
             }
+            completed = true;
         } catch(...) {
-            if(scenario)
-                scenario->Release();
+            error = TVPWebPrefetchExceptionMessage(std::current_exception());
+        }
+        if(scenario)
+            scenario->Release();
+
+        TVPFinishWebScenarioPrefetch(task, completed,
+                                     completed ? "done" : "failed", error);
+        TVPWebPrefetchScheduleTask(TVPProcessWebScenarioPrefetch, nullptr);
+    }
+
+    void TVPCompleteWebScenarioPrefetchRead(
+        const tTVPWebScenarioPrefetchStreamTaskPtr &task, tjs_uint read,
+        const std::exception_ptr &error) {
+        // ReadAsync 的完成在流 I/O executor 上发生；只把轻量状态转回
+        // 应用消息队列。真正的 TVPGetScenario 只在下一次主循环中执行。
+        Application->PostUserMessage([task, read, error]() {
+            if(!task || TVPWebScenarioPrefetchActiveTask.get() != task.get())
+                return;
+            if(error) {
+                TVPFinishWebScenarioPrefetch(
+                    task, false, "failed",
+                    TVPWebPrefetchExceptionMessage(error));
+                TVPWebPrefetchScheduleTask(TVPProcessWebScenarioPrefetch,
+                                           nullptr);
+                return;
+            }
+
+            task->BytesRead += read;
+            if(read == 0) {
+                TVPScanWarmedWebScenario(task);
+                return;
+            }
+
+            TVPWebPrefetchScheduleTask(TVPProcessWebScenarioPrefetch,
+                                       nullptr);
+        });
+    }
+
+    void TVPProcessWebScenarioPrefetch(void *) {
+        if(!TVPWebScenarioPrefetchActiveTask) {
+            if(TVPWebScenarioPrefetchQueue.empty()) {
+                TVPWebScenarioPrefetchScheduled = false;
+                return;
+            }
+
+            const tTVPWebScenarioPrefetchTask task =
+                TVPWebScenarioPrefetchQueue.front();
+            TVPWebScenarioPrefetchQueue.pop_front();
+            const std::pair<ttstr, ttstr> key(task.Storage, task.Target);
+            TVPWebScenarioPrefetchQueued.erase(key);
+            TVPWebScenarioPrefetchInFlight.insert(key);
+            TVPWebScenarioPrefetchActiveTask =
+                std::make_shared<tTVPWebScenarioPrefetchStreamTask>(task);
+            TVPWebScenarioPrefetchActiveTask->StartedAt =
+                emscripten_get_now();
             TVPWebPrefetchTrace(
-                "scenario-failed storage='" +
-                TVPKAGTraceNarrow(task.Storage) + "' target='" +
-                TVPKAGTraceNarrow(task.Target) + "'");
+                "scenario-start storage='" + TVPKAGTraceNarrow(task.Storage) +
+                "' target='" + TVPKAGTraceNarrow(task.Target) + "' depth=" +
+                std::to_string(task.Depth));
+
+            try {
+                TVPWebScenarioPrefetchActiveTask->Stream.reset(
+                    TVPCreateStream(task.Storage, TJS_BS_READ));
+                if(!TVPWebScenarioPrefetchActiveTask->Stream)
+                    TVPFinishWebScenarioPrefetch(
+                        TVPWebScenarioPrefetchActiveTask, false, "failed",
+                        "Cannot open scenario stream");
+            } catch(...) {
+                TVPFinishWebScenarioPrefetch(
+                    TVPWebScenarioPrefetchActiveTask, false, "failed",
+                    TVPWebPrefetchExceptionMessage(std::current_exception()));
+            }
         }
 
-        TVPWebPrefetchScheduleTask(TVPProcessWebScenarioPrefetch, nullptr);
+        if(!TVPWebScenarioPrefetchActiveTask ||
+           !TVPWebScenarioPrefetchActiveTask->Stream) {
+            TVPWebPrefetchScheduleTask(TVPProcessWebScenarioPrefetch, nullptr);
+            return;
+        }
+
+        const tTVPWebScenarioPrefetchStreamTaskPtr task =
+            TVPWebScenarioPrefetchActiveTask;
+        try {
+            task->Stream->ReadAsync(
+                task->Buffer.data(), static_cast<tjs_uint>(task->Buffer.size()),
+                [task](tjs_uint read, std::exception_ptr error) {
+                    TVPCompleteWebScenarioPrefetchRead(task, read, error);
+                });
+        } catch(...) {
+            TVPFinishWebScenarioPrefetch(
+                task, false, "failed",
+                TVPWebPrefetchExceptionMessage(std::current_exception()));
+            TVPWebPrefetchScheduleTask(TVPProcessWebScenarioPrefetch, nullptr);
+        }
     }
 }
 
@@ -3709,12 +3897,15 @@ void tTJSNI_KAGParser::QueueWebScenarioPrefetch() {
         WebPrefetchThroughLine = CurLine - 1;
     } else if(WebPrefetchThroughLine >= CurLine + 8) {
         // 解析器仍在已扫描窗口内；等它接近窗口尾部再增量扩展。
+        TVPImportWebLearnedPrefetch();
         return;
     }
 
     tjs_int start = std::max(CurLine, WebPrefetchThroughLine + 1);
-    if(start >= LineCount)
+    if(start >= LineCount) {
+        TVPImportWebLearnedPrefetch();
         return;
+    }
 
     const tTVPWebScenarioScanResult result =
         TVPScanWebScenario(StorageName, Scenario, start, 0);
@@ -3731,6 +3922,9 @@ void tTJSNI_KAGParser::QueueWebScenarioPrefetch() {
             result.StopReason + " tags='" +
             TVPWebPrefetchFormatTagShapes(result) + "'",
         true);
+    // 当前脚本的静态候选优先于历史学习清单，避免旧清单占满
+    // 队列后把存档位置附近的立即候选丢掉。
+    TVPImportWebLearnedPrefetch();
 }
 #endif
 

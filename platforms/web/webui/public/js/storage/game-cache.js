@@ -8,9 +8,21 @@
     var ROOT_DIR = 'krkr2-game-cache';
     var GAMES_DIR = 'games';
     var SCHEMA_VERSION = 1;
+    var PREFETCH_MANIFEST_FILE = 'prefetch-manifest.json';
+    var PREFETCH_MANIFEST_VERSION = 1;
+    var PREFETCH_PATH_LIMIT = 256;
+    var PREFETCH_FLUSH_DELAY = 750;
     var metadataQueue = Promise.resolve();
     var persistenceRequested = false;
     var activeCaches = new Set();
+    var prefetchStates = new Map();
+
+    var PREFETCH_EXTENSIONS = [
+        '.png', '.jpg', '.jpeg', '.jif', '.bmp', '.dib', '.tlg', '.tlg5',
+        '.tlg6', '.webp', '.jxr', '.pvr', '.bpg', '.pimg', '.psb', '.mtn',
+        '.wav', '.ogg', '.mp3', '.m4a', '.opus', '.aac', '.flac', '.mid',
+        '.midi', '.wma', '.mp4', '.webm'
+    ];
 
     function hasOpfs() {
         return typeof navigator !== 'undefined' && navigator.storage &&
@@ -69,6 +81,171 @@
         } catch (e) {
             console.warn('[game-cache] persistent storage request failed:', e);
         }
+    }
+
+    function normalizePrefetchPath(path) {
+        if (typeof path !== 'string') return '';
+        path = path.trim();
+        if (!path || path.length > 2048) return '';
+        var lower = path.toLowerCase();
+        for (var i = 0; i < PREFETCH_EXTENSIONS.length; i++) {
+            if (lower.endsWith(PREFETCH_EXTENSIONS[i])) return path;
+        }
+        return '';
+    }
+
+    function getPrefetchState(gameId) {
+        gameId = gameId ? String(gameId) : '';
+        if (!gameId) return null;
+        var state = prefetchStates.get(gameId);
+        if (!state) {
+            state = {
+                gameId: gameId,
+                gameDir: null,
+                paths: new Set(),
+                loaded: false,
+                loadPromise: null,
+                flushPromise: Promise.resolve(),
+                flushTimer: 0,
+                dirty: false
+            };
+            prefetchStates.set(gameId, state);
+        }
+        return state;
+    }
+
+    function updateActivePrefetchPaths(gameId, paths, ready) {
+        if (!window.Module ||
+            String(window.Module._gameCacheId || '') !== String(gameId || ''))
+            return;
+        window.Module._webPrefetchLearnedPaths = paths.slice();
+        window.Module._webPrefetchLearnedReady = ready === true;
+    }
+
+    async function ensurePrefetchState(state) {
+        if (!state || state.loaded) return state;
+        if (!state.loadPromise) {
+            state.loadPromise = (async function () {
+                var games = await getGamesDir(true);
+                if (!games) {
+                    state.loaded = true;
+                    return state;
+                }
+                var gameKey = await hashText(state.gameId);
+                state.gameDir = await games.getDirectoryHandle(
+                    gameKey, { create: true });
+                var manifest = await readJson(
+                    state.gameDir, PREFETCH_MANIFEST_FILE);
+                if (manifest &&
+                    manifest.version === PREFETCH_MANIFEST_VERSION &&
+                    manifest.gameId === state.gameId &&
+                    Array.isArray(manifest.paths)) {
+                    var paths = manifest.paths.slice(-PREFETCH_PATH_LIMIT);
+                    for (var i = 0; i < paths.length; i++) {
+                        var normalized = normalizePrefetchPath(paths[i]);
+                        if (normalized) state.paths.add(normalized);
+                    }
+                }
+                state.loaded = true;
+                return state;
+            })();
+        }
+        try {
+            return await state.loadPromise;
+        } finally {
+            state.loadPromise = null;
+        }
+    }
+
+    function flushPrefetchState(state) {
+        if (!state) return Promise.resolve();
+        if (state.flushTimer) {
+            clearTimeout(state.flushTimer);
+            state.flushTimer = 0;
+        }
+        var run = state.flushPromise.then(async function () {
+            await ensurePrefetchState(state);
+            if (!state.dirty || !state.gameDir) return;
+            var paths = Array.from(state.paths).slice(-PREFETCH_PATH_LIMIT);
+            state.dirty = false;
+            try {
+                await writeJson(state.gameDir, PREFETCH_MANIFEST_FILE, {
+                    version: PREFETCH_MANIFEST_VERSION,
+                    gameId: state.gameId,
+                    updatedAt: Date.now(),
+                    paths: paths
+                });
+            } catch (e) {
+                state.dirty = true;
+                throw e;
+            }
+        });
+        state.flushPromise = run.catch(function () {});
+        return run;
+    }
+
+    function schedulePrefetchFlush(state) {
+        if (!state || state.flushTimer) return;
+        state.flushTimer = setTimeout(function () {
+            state.flushTimer = 0;
+            flushPrefetchState(state).catch(function (e) {
+                console.warn('[game-cache] prefetch manifest update failed:', e);
+            });
+        }, PREFETCH_FLUSH_DELAY);
+    }
+
+    async function loadPrefetchManifest(gameId) {
+        var state = getPrefetchState(gameId);
+        if (!state || !hasOpfs()) return [];
+        try {
+            await ensurePrefetchState(state);
+            // 最近学习到的资源先进预读队列。
+            return Array.from(state.paths).reverse();
+        } catch (e) {
+            console.warn('[game-cache] prefetch manifest load failed:', e);
+            return [];
+        }
+    }
+
+    async function rememberPrefetchPath(gameId, path) {
+        var normalized = normalizePrefetchPath(path);
+        var state = getPrefetchState(gameId);
+        if (!normalized || !state || !hasOpfs()) return false;
+        await ensurePrefetchState(state);
+        if (state.paths.has(normalized)) return false;
+
+        state.paths.add(normalized);
+        while (state.paths.size > PREFETCH_PATH_LIMIT) {
+            state.paths.delete(state.paths.values().next().value);
+        }
+        state.dirty = true;
+        schedulePrefetchFlush(state);
+        updateActivePrefetchPaths(
+            state.gameId, Array.from(state.paths).reverse(), true);
+        return true;
+    }
+
+    async function invalidatePrefetchManifest(gameId, gameDir) {
+        var state = getPrefetchState(gameId);
+        if (!state) return;
+        if (state.flushTimer) {
+            clearTimeout(state.flushTimer);
+            state.flushTimer = 0;
+        }
+        await state.flushPromise.catch(function () {});
+        state.gameDir = gameDir || state.gameDir;
+        state.paths.clear();
+        state.loaded = true;
+        state.loadPromise = null;
+        state.dirty = false;
+        if (state.gameDir) {
+            try {
+                await state.gameDir.removeEntry(PREFETCH_MANIFEST_FILE);
+            } catch (e) {
+                if (!e || e.name !== 'NotFoundError') throw e;
+            }
+        }
+        updateActivePrefetchPaths(state.gameId, [], true);
     }
 
     function serializeMetadata(action) {
@@ -137,7 +314,9 @@
         var sourceKey = await hashText(identity);
 
         var meta = await readJson(gameDir, 'metadata.json');
-        if (!meta || meta.version !== SCHEMA_VERSION || meta.gameId !== gameId) {
+        var metadataRecreated = !meta || meta.version !== SCHEMA_VERSION ||
+            meta.gameId !== gameId;
+        if (metadataRecreated) {
             meta = {
                 version: SCHEMA_VERSION,
                 gameId: gameId,
@@ -149,15 +328,21 @@
             meta.sources = {};
 
         var previous = meta.sources[slotKey];
+        var sourceChanged = metadataRecreated ||
+            (previous && previous.sourceKey !== sourceKey) ||
+            (!previous && Object.keys(meta.sources).length > 0);
         if (previous && previous.sourceKey !== sourceKey) {
             try {
                 await sourcesDir.removeEntry(previous.sourceKey, {
                     recursive: true
                 });
-                console.log('[game-cache] invalidated changed source:', slot);
             } catch (e) {
                 console.warn('[game-cache] old source cleanup failed:', e);
             }
+        }
+        if (sourceChanged) {
+            await invalidatePrefetchManifest(gameId, gameDir);
+            console.log('[game-cache] invalidated prefetch manifest:', slot);
         }
 
         var sourceDir = await sourcesDir.getDirectoryHandle(
@@ -278,6 +463,16 @@
     async function deleteGame(gameId) {
         if (!gameId || !hasOpfs()) return false;
         gameId = String(gameId);
+        var state = prefetchStates.get(gameId);
+        if (state) {
+            if (state.flushTimer) clearTimeout(state.flushTimer);
+            state.flushTimer = 0;
+            state.dirty = false;
+            await state.flushPromise.catch(function () {});
+            state.paths.clear();
+            prefetchStates.delete(gameId);
+            updateActivePrefetchPaths(gameId, [], true);
+        }
         try {
             var games = await getGamesDir(false);
             var gameKey = await hashText(gameId);
@@ -305,6 +500,8 @@
         readBlock: readBlock,
         writeBlock: writeBlock,
         setExpandedBytes: setExpandedBytes,
+        loadPrefetchManifest: loadPrefetchManifest,
+        rememberPrefetchPath: rememberPrefetchPath,
         getGameInfo: getGameInfo,
         deleteGame: deleteGame,
         estimate: estimate
@@ -314,6 +511,8 @@
         window.addEventListener('pagehide', function () {
             for (var cache of activeCaches)
                 flushSourceUsage(cache).catch(function () {});
+            for (var state of prefetchStates.values())
+                flushPrefetchState(state).catch(function () {});
         });
     }
 })();

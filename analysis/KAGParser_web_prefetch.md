@@ -21,6 +21,9 @@
   `EnsureSegment@0x8FD204`，再按 segment 逐块读取；压缩段从解压缓存复制，未压缩
   段从底层 stream 读取，之后执行 extraction filter，并按顺序更新 segment/file
   游标。Web `ReadAsync` 保留相同顺序，只在底层存储 I/O 处拆成续体。
+- `sub_8ECD90 @ 0x8ECD90` 是 `TVPCreateStream`：加锁后按读写模式解析
+  路径，对归档内条目与普通存储分别创建 stream；成功返回 stream，找不到
+  或打开失败则抛错。Web 学习挂点仅位于两条成功返回路径之后。
 - `TVPTouchImages@0x7F311C` 由 `System.touchImages` 包装
   `sub_8F25B4@0x8F25B4` 调用；它先检查图像缓存开关和容量，再按 storage 顺序创建
   临时 Bitmap 并交给异步图片线程。图形扩展名建议链位于
@@ -63,19 +66,23 @@ return TJS_S_OK;
 
 图片和语音/BGM 各有一条独立异步读取队列，通过 `ReadAsync()` /
 `EnsureSegmentAsync()` 按 256 KiB 小步读取；完成回调从 stream I/O executor 投递回
-应用主线程后才更新队列。无扩展名音频候选先按实际存在的常见音频扩展名解析，因此
-纸魔的 `BGM15`/`BGM20` 可以落到实际归档项。两条资源队列和场景队列的后继任务都
-至少让出 8 ms，下载不会在一次剧情推进中批量堵塞主线程。`TVPGetScenario(..., false)` 有意不调用真实 `LoadScenario`
-及脚本回调，因为前瞻不得执行游戏代码；因此 `onScenarioLoad` 动态生成的场景属于
-明确的平台边界，扫描失败会安全跳过，真实执行仍保留原始路径。
+应用主线程后才更新队列。场景队列也先用同一 `CreateStream + ReadAsync`
+读到 EOF，使脚本所在的 VLFS 分块已进入内存/OPFS 缓存；之后才在
+`Application::ProcessMessages()` 中调用 `TVPGetScenario` 并扫描。每个续体都投递成
+下一帧消息，不会在一次剧情推进中批量执行。
 
-普通 `emscripten_async_call` 的 wasm table 回调不是 JSPI promising 入口。运行日志
-已证明：跨场景任务读取未缓存的 `scenario_1_1.ks` 时会抛
-`SuspendError: trying to suspend without WebAssembly.promising`。前瞻调度因此改为
-`WebAssembly.promising(wasmTable.get(callback))` 后再由定时器调用；场景、图片、
-二进制三类前瞻共用此调度入口。二进制任务不再从 promising 包装内同步 `Read()`
-并跨 Promise 保留 C++ 栈，而是使用已有续体式异步流 API；这个平台适配不改变
-`sub_561F3C` 或真实 KAG parser 的调用链。
+旧实现用 `WebAssembly.promising(wasmTable.get(callback))` 手工包装普通
+wasm table 回调，但它并不能把整条未导出的 C++ 调用链变成合法 JSPI
+挂起点；冷缓存读取因此会抛异常并使场景队列停死。该包装已删除。
+场景任务现在分为 `Queued/InFlight/Completed`：成功才进入 `Completed`，
+失败会移出 `InFlight` 并继续后续任务，既不卡死也不会被永久去重。
+
+静态 KAG 扫描仍负责首次游玩的当前场景。`iscript`、timeline 或宏在第一次
+执行前无法通过不执行游戏代码安全预测；为此 Web 后置挂点会记录
+`TVPCreateStream` 实际成功打开的图像/动作/音频路径。清单与远程分块一样保存在
+`krkr2-game-cache/games/<game>`，下次启动优先异步预热；指纹或源集合改变时
+自动清空，按游戏清理缓存也会一并删除。这覆盖动态资源的“下次启动”；
+首次遇到从未执行过的动态分支时，仍只能由正常按需加载完成学习。
 
 诊断开关由页面在 glue 注入前写入 `Module._webPrefetchEnabled` 与
 `Module._webPrefetchTrace`。C++ 只读取这两个平台槽位；`?prefetch=0` 仅绕过
