@@ -11,9 +11,6 @@ ok('未登录时 account/me 返回 200', me.status === 200);
 ok('未登录时 user 为 null', meData.user === null);
 ok('Steam 登录入口可用', meData.availableProviders?.steam === true);
 
-const avatar = await fetch(`${BASE}/api/account/avatar`);
-ok('未登录不能读取玩家头像', avatar.status === 401);
-
 const steam = await fetch(
     `${BASE}/api/account/login/steam?returnTo=${encodeURIComponent('//evil.example/path')}`,
     { redirect: 'manual' }

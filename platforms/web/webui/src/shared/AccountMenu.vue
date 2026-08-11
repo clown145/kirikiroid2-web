@@ -118,7 +118,8 @@ onUnmounted(() => {
                 aria-haspopup="menu"
                 @click="showMenu = !showMenu">
                 <span class="account-avatar" aria-hidden="true">
-                    <img v-if="showAvatar" :src="user.avatarUrl" alt="" @error="avatarFailed = true">
+                    <img v-if="showAvatar" :src="user.avatarUrl" alt="" crossorigin="anonymous"
+                        referrerpolicy="no-referrer" @error="avatarFailed = true">
                     <template v-else>{{ initial }}</template>
                 </span>
                 <span class="account-name">{{ user.displayName }}</span>
@@ -130,7 +131,8 @@ onUnmounted(() => {
             <div v-if="showMenu" class="account-menu" role="menu">
                 <div class="account-summary">
                     <span class="account-avatar large" aria-hidden="true">
-                        <img v-if="showAvatar" :src="user.avatarUrl" alt="" @error="avatarFailed = true">
+                        <img v-if="showAvatar" :src="user.avatarUrl" alt="" crossorigin="anonymous"
+                            referrerpolicy="no-referrer" @error="avatarFailed = true">
                         <template v-else>{{ initial }}</template>
                     </span>
                     <span>
