@@ -7,15 +7,35 @@
 // 不可靠（引擎会吃掉 canvas 上的 touch，系统/浏览器又会抢顶边手势）。
 // 露出后 3 秒无交互自动收起；指针停在条上时不收。
 
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 
 const props = defineProps({
     title: { type: String, default: '' },
     isFullscreen: { type: Boolean, default: false },
-    fullscreenAvailable: { type: Boolean, default: true }
+    fullscreenAvailable: { type: Boolean, default: true },
+    // 边玩边下开关与当前缓存进度。cacheState 为 null 表示该来源不支持
+    // 缓存（本地文件、?xp3= 调试入口），此时整个按钮不出现。
+    downloadEnabled: { type: Boolean, default: false },
+    cacheState: { type: Object, default: null }
 });
 
-const emit = defineEmits(['exit', 'toggle-fullscreen', 'open-saves']);
+const emit = defineEmits(['exit', 'toggle-fullscreen', 'open-saves', 'toggle-download']);
+
+const downloadLabel = computed(() => {
+    const s = props.cacheState;
+    if (!s) return '边玩边下';
+    if (s.done) return '已缓存';
+    if (props.downloadEnabled) return `下载中 ${s.pct}%`;
+    return s.pct > 0 ? `已缓存 ${s.pct}%` : '边玩边下';
+});
+
+// 利弊都写出来：不写清代价（流量、抢带宽），玩家没法判断该不该开
+const downloadTitle = computed(() => {
+    if (props.cacheState?.done) return '本作资源已全部缓存到本地，不会再产生下载流量。';
+    return props.downloadEnabled
+        ? '边玩边下：开启中。\n后台补齐剩余资源，玩到哪都不用等，最终整包留在本地。\n代价：会下载你可能永远看不到的分支与结局资源；弱网下可能与当前读取抢带宽。'
+        : '边玩边下：已关闭。\n只下载当前真正需要的字节，最省流量。\n首次经过的场景会有加载等待。';
+});
 
 const visible = ref(false);
 const hovering = ref(false);
@@ -162,6 +182,19 @@ onUnmounted(() => {
             <span class="title" :title="title">{{ title }}</span>
 
             <div class="right">
+                <button
+                    v-if="cacheState"
+                    class="btn btn-ghost btn-sm dl"
+                    :class="{ on: downloadEnabled, done: cacheState.done }"
+                    @click="emit('toggle-download')"
+                    :title="downloadTitle">
+                    <svg viewBox="0 0 24 24" fill="currentColor" width="15" height="15" aria-hidden="true">
+                        <path v-if="cacheState.done" d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
+                        <path v-else d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
+                    </svg>
+                    {{ downloadLabel }}
+                </button>
+
                 <button class="btn btn-ghost btn-sm" @click="emit('open-saves')" title="存档空间">
                     <svg viewBox="0 0 24 24" fill="currentColor" width="15" height="15" aria-hidden="true">
                         <path d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zm-5 16a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm3-10H5V5h10v4z" />
@@ -289,6 +322,10 @@ onUnmounted(() => {
 }
 
 .right { display: flex; gap: var(--space-1); }
+
+/* 边玩边下按钮：开启时才着色，关闭态与其余按钮一致，不喧宾夺主 */
+.dl.on { color: var(--fg-0); background: rgba(255, 255, 255, 0.14); }
+.dl.done { color: var(--fg-2); }
 
 .slide-enter-active, .slide-leave-active {
     transition: transform var(--dur) var(--ease), opacity var(--dur) var(--ease);

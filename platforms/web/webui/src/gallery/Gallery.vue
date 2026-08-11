@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { api } from '../shared/api.js';
 import GameCard from './GameCard.vue';
 
@@ -33,6 +33,181 @@ const filtered = computed(() => {
 // 库里一个游戏都没有 vs 有游戏但筛没了 —— 两种空状态的引导完全不同
 const isEmptyLibrary = computed(() => !loading.value && games.value.length === 0);
 
+// --- 缓存与预下载 -----------------------------------------------------
+// 画廊页不加载引擎，这些能力全部来自 public/js/storage/*（window.KrKr2Cache）。
+const cacheMap = ref({});          // gameKey -> {bytes, size, complete}
+const dlState = ref(null);         // 当前下载 {gameKey, pct, running, done}
+const usage = ref(null);
+const showCachePanel = ref(false);
+const pendingNav = ref(null);      // 有下载在跑时被拦下的跳转
+const pendingDownload = ref(null); // 等待"存哪里"决定的下载
+const storage = ref(null);         // {kind, name, supported, bound, needsPermission}
+const dismissedFolderPrompt = ref(false);
+let dlPoll = null;
+
+async function refreshCache() {
+    if (!window.KrKr2Cache) return;
+    try {
+        const list = await window.KrKr2Cache.list();
+        const map = {};
+        for (const g of list) map[g.gameKey] = g;
+        cacheMap.value = map;
+    } catch { /* 缓存不可用时画廊照常工作 */ }
+}
+
+async function refreshUsage() {
+    if (!window.KrKr2Cache) return;
+    try { usage.value = await window.KrKr2Cache.usage(); } catch {}
+}
+
+function pollDownload() {
+    dlState.value = window.KrKr2Cache?.downloadState?.() || null;
+    if (dlState.value?.done) {
+        refreshCache();
+        dlState.value = null;
+        window.KrKr2Cache?.stopDownload();
+    }
+}
+
+async function onDownload(game) {
+    if (!window.KrKr2Cache) return;
+    const cur = window.KrKr2Cache.downloadState();
+    // 再点正在下的那个 = 停止（进度已落盘，下次续传）
+    if (cur && cur.gameKey === game.id) {
+        window.KrKr2Cache.stopDownload();
+        dlState.value = null;
+        await refreshCache();
+        return;
+    }
+    if (cacheMap.value[game.id]?.complete) {
+        showCachePanel.value = true;   // 已下完，改为引导去管理
+        await refreshUsage();
+        return;
+    }
+
+    // 首次完整下载先问存哪：点这个按钮本身就是"我要长期留着"的意思，
+    // 而 OPFS 存不住几个 GB —— 浏览器在存储压力下会清掉它。
+    storage.value = await window.KrKr2Cache.storageInfo();
+    if (storage.value.supported && storage.value.kind !== 'folder' &&
+        !dismissedFolderPrompt.value) {
+        pendingDownload.value = game;
+        return;
+    }
+    await beginDownload(game);
+}
+
+async function beginDownload(game) {
+    try {
+        // 一次只下一个：并行下两个只会都变慢，还抢光连接
+        await window.KrKr2Cache.download({
+            gameKey: game.id,
+            title: game.title,
+            url: (game.downloadUrl || '').trim(),
+            onDone: () => { refreshCache(); }
+        });
+        pollDownload();
+    } catch (err) {
+        alert('无法开始下载：' + (err?.message || err));
+    }
+}
+
+/** 用户在引导框里选了「选择文件夹」。必须在手势里调用才能弹选择器。 */
+async function chooseFolder() {
+    try {
+        await window.KrKr2Cache.bindFolder();
+        storage.value = await window.KrKr2Cache.storageInfo();
+    } catch (err) {
+        if (err?.name === 'AbortError') return;    // 用户取消了选择器
+        alert('绑定文件夹失败：' + (err?.message || err));
+        return;
+    }
+    const game = pendingDownload.value;
+    pendingDownload.value = null;
+    if (game) await beginDownload(game);
+}
+
+/** 选择「暂不，存浏览器里」。本次会话不再追问。 */
+async function skipFolder() {
+    dismissedFolderPrompt.value = true;
+    const game = pendingDownload.value;
+    pendingDownload.value = null;
+    if (game) await beginDownload(game);
+}
+
+/*
+ * MPA 下跳去播放页会销毁整个 Document，后台下载随之中断。
+ * 已下的区间留在 OPFS，下次从洞继续，所以这里只需告知，不必阻止。
+ */
+function onNavigate(game, event) {
+    if (!dlState.value?.running) return;
+    event.preventDefault();
+    pendingNav.value = { game, href: `/play/${encodeURIComponent(game.id)}` };
+}
+
+function confirmNav() {
+    const href = pendingNav.value?.href;
+    window.KrKr2Cache?.stopDownload();      // 保存进度再走
+    pendingNav.value = null;
+    if (href) location.href = href;
+}
+
+function stopCurrentDownload() {
+    window.KrKr2Cache?.stopDownload();
+    dlState.value = null;
+    refreshCache();
+}
+
+async function removeCache(gameKey) {
+    await window.KrKr2Cache?.remove(gameKey);
+    await refreshCache();
+    await refreshUsage();
+}
+
+async function removeAllCache() {
+    if (!confirm('清空所有游戏的本地缓存？下次游玩需要重新下载。')) return;
+    await window.KrKr2Cache?.removeAll();
+    dlState.value = null;
+    await refreshCache();
+    await refreshUsage();
+}
+
+async function openCachePanel() {
+    showCachePanel.value = true;
+    storage.value = await window.KrKr2Cache?.storageInfo();
+    await refreshUsage();
+    await refreshCache();
+}
+
+/** 在缓存面板里切换/恢复存储位置。 */
+async function bindFolderFromPanel() {
+    try {
+        await window.KrKr2Cache.bindFolder();
+    } catch (err) {
+        if (err?.name !== 'AbortError') alert('绑定失败：' + (err?.message || err));
+    }
+    storage.value = await window.KrKr2Cache.storageInfo();
+    await refreshCache();
+    await refreshUsage();
+}
+
+async function unbindFolderFromPanel() {
+    if (!confirm('不再使用该文件夹？已下载的文件会留在磁盘上，不会被删除。')) return;
+    await window.KrKr2Cache.unbindFolder();
+    storage.value = await window.KrKr2Cache.storageInfo();
+    dlState.value = null;
+    await refreshCache();
+    await refreshUsage();
+}
+
+function fmtBytes(bytes) {
+    if (!bytes) return '0 MB';
+    const mb = bytes / 1048576;
+    return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : Math.round(mb) + ' MB';
+}
+
+const cachedList = computed(() =>
+    Object.values(cacheMap.value).sort((a, b) => b.bytes - a.bytes));
+
 function toggleTag(tag) {
     activeTag.value = activeTag.value === tag ? '' : tag;
 }
@@ -50,6 +225,12 @@ onMounted(async () => {
     } finally {
         loading.value = false;
     }
+    await refreshCache();
+    dlPoll = setInterval(pollDownload, 700);
+});
+
+onUnmounted(() => {
+    if (dlPoll) clearInterval(dlPoll);
 });
 </script>
 
@@ -63,6 +244,7 @@ onMounted(async () => {
         </a>
 
         <div class="nav-right">
+            <button class="btn btn-ghost btn-sm" @click="openCachePanel">本地缓存</button>
             <a class="btn btn-ghost btn-sm" href="/play/local">打开本地文件</a>
             <a class="btn btn-ghost btn-sm" href="/admin">管理</a>
         </div>
@@ -125,9 +307,123 @@ onMounted(async () => {
         </div>
 
         <div v-else class="grid">
-            <GameCard v-for="game in filtered" :key="game.id" :game="game" />
+            <GameCard
+                v-for="game in filtered"
+                :key="game.id"
+                :game="game"
+                :cache-info="cacheMap[game.id] || null"
+                :downloading="dlState && dlState.gameKey === game.id ? dlState : null"
+                @download="onDownload(game)"
+                @navigate="(e) => onNavigate(game, e)" />
         </div>
     </main>
+
+    <!-- 下载中的状态条。常驻可见，玩家才知道后台在跑什么、离开会怎样。 -->
+    <div v-if="dlState && dlState.running" class="dlbar">
+        <div class="dlbar-in">
+            <span class="dlbar-txt">
+                正在下载 <strong>{{ dlState.title || dlState.gameKey }}</strong>
+                · {{ dlState.pct }}%（{{ fmtBytes(dlState.bytes) }} / {{ fmtBytes(dlState.size) }}）
+            </span>
+            <span class="dlbar-hint">离开本页会暂停，已下载的部分会保留</span>
+            <button class="btn btn-sm" @click="stopCurrentDownload">停止</button>
+        </div>
+        <div class="dlbar-track"><span :style="{ width: dlState.pct + '%' }" /></div>
+    </div>
+
+    <!-- 跳转确认：不阻止离开，只是让玩家知道下载会停 -->
+    <div v-if="pendingNav" class="modal" @click.self="pendingNav = null">
+        <div class="modal-box">
+            <h3>下载将暂停</h3>
+            <p>
+                《{{ dlState?.title || '当前游戏' }}》已下载 {{ dlState?.pct ?? 0 }}%。
+                进入游戏会离开本页，后台下载随之暂停 —— 已下载的部分保留在本地，
+                下次继续时从中断处接着下，不会从头再来。
+            </p>
+            <div class="modal-actions">
+                <button class="btn" @click="pendingNav = null">留在本页</button>
+                <button class="btn btn-primary" @click="confirmNav">仍然进入游戏</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 存哪里：点「完整下载」时问一次。这是唯一能让几个 GB 真正留住的入口 -->
+    <div v-if="pendingDownload" class="modal" @click.self="pendingDownload = null">
+        <div class="modal-box">
+            <h3>把游戏存到哪里？</h3>
+            <p>
+                选一个自己的文件夹，下载的游戏就是磁盘上的普通文件 ——
+                浏览器永远不会自动清除，你也能直接拷走或备份。下完之后那个
+                文件就是完整可用的游戏包。
+            </p>
+            <p class="warn">
+                存在浏览器内部则无需授权，但它是临时存储：设备空间紧张时
+                系统可能把它清掉，清理浏览数据也会一并删除。几个 GB 的游戏
+                不建议放那里。
+            </p>
+            <div class="modal-actions">
+                <button class="btn" @click="skipFolder">暂不，存浏览器里</button>
+                <button class="btn btn-primary" @click="chooseFolder">选择文件夹</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 缓存管理：分游戏清理 -->
+    <div v-if="showCachePanel" class="modal" @click.self="showCachePanel = false">
+        <div class="modal-box wide">
+            <h3>本地缓存</h3>
+
+            <div v-if="storage" class="storage-row">
+                <span>
+                    存储位置：
+                    <strong v-if="storage.kind === 'folder'">{{ storage.name }}</strong>
+                    <strong v-else>浏览器内部存储</strong>
+                    <em v-if="storage.kind !== 'folder'">（可能被系统清除）</em>
+                    <em v-if="storage.needsPermission">（授权已过期，点右侧恢复）</em>
+                </span>
+                <button
+                    v-if="storage.supported"
+                    class="btn btn-ghost btn-sm"
+                    @click="bindFolderFromPanel">
+                    {{ storage.kind === 'folder' ? '更换' : (storage.needsPermission ? '恢复访问' : '选择文件夹') }}
+                </button>
+                <button
+                    v-if="storage.kind === 'folder'"
+                    class="btn btn-ghost btn-sm"
+                    @click="unbindFolderFromPanel">
+                    解除
+                </button>
+            </div>
+
+            <p v-if="usage" class="usage">
+                已占用 {{ fmtBytes(usage.totalBytes) }}
+                <template v-if="usage.limit && isFinite(usage.limit)">
+                    / 上限 {{ fmtBytes(usage.limit) }}
+                </template>
+                <template v-if="usage.zipBytes">（其中解压产物 {{ fmtBytes(usage.zipBytes) }}）</template>
+            </p>
+            <p class="usage note">
+                超出上限时，最久没玩的游戏会被整个清除。绑定文件夹后不受此限制。
+            </p>
+
+            <ul v-if="cachedList.length" class="cache-list">
+                <li v-for="c in cachedList" :key="c.gameKey">
+                    <span class="cl-title">{{ c.title || c.gameKey }}</span>
+                    <span class="cl-size">
+                        {{ fmtBytes(c.bytes) }}
+                        <template v-if="c.complete"> · 完整</template>
+                    </span>
+                    <button class="btn btn-ghost btn-sm" @click="removeCache(c.gameKey)">清理</button>
+                </li>
+            </ul>
+            <p v-else class="usage">还没有缓存任何游戏。</p>
+
+            <div class="modal-actions">
+                <button v-if="cachedList.length" class="btn" @click="removeAllCache">全部清理</button>
+                <button class="btn btn-primary" @click="showCachePanel = false">关闭</button>
+            </div>
+        </div>
+    </div>
 </template>
 
 <style scoped>
@@ -290,5 +586,131 @@ onMounted(async () => {
     .search { min-width: 0; width: 100%; }
     .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: var(--space-3); }
     .h1 { font-size: 22px; }
+}
+
+/* --- 下载状态条：贴底常驻，玩家得随时知道后台在跑什么 --- */
+.dlbar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: var(--z-toolbar);
+    background: rgba(10, 10, 11, 0.94);
+    backdrop-filter: blur(16px);
+    border-top: 1px solid var(--line);
+}
+
+.dlbar-in {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-5);
+    font-size: 12px;
+}
+
+.dlbar-txt { color: var(--fg-0); }
+.dlbar-hint { color: var(--fg-2); margin-left: auto; }
+.dlbar-track { height: 2px; background: rgba(255, 255, 255, 0.1); }
+.dlbar-track span {
+    display: block;
+    height: 100%;
+    background: var(--fg-0);
+    transition: width 240ms var(--ease);
+}
+
+/* --- 模态 --- */
+.modal {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-modal, 100);
+    display: grid;
+    place-items: center;
+    padding: var(--space-4);
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+}
+
+.modal-box {
+    width: min(440px, 100%);
+    max-height: 80vh;
+    overflow-y: auto;
+    padding: var(--space-4);
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+}
+
+.modal-box.wide { width: min(560px, 100%); }
+.modal-box h3 { margin: 0 0 var(--space-2); font-size: 15px; }
+.modal-box p {
+    margin: 0 0 var(--space-3);
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--fg-1);
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    margin-top: var(--space-3);
+}
+
+.usage { font-size: 12px; color: var(--fg-1); }
+.usage.note { color: var(--fg-2); font-size: 11px; }
+
+.warn {
+    padding: var(--space-2);
+    border-radius: 6px;
+    background: rgba(255, 180, 60, 0.08);
+    border: 1px solid rgba(255, 180, 60, 0.2);
+    font-size: 12px !important;
+}
+
+.storage-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    margin-bottom: var(--space-3);
+    padding-bottom: var(--space-3);
+    border-bottom: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--fg-1);
+}
+
+.storage-row > span { flex: 1; min-width: 0; }
+.storage-row strong { color: var(--fg-0); font-weight: 600; }
+.storage-row em { color: var(--fg-2); font-style: normal; }
+
+.cache-list {
+    list-style: none;
+    margin: 0 0 var(--space-2);
+    padding: 0;
+    border-top: 1px solid var(--line);
+}
+
+.cache-list li {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+}
+
+.cl-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cl-size { flex: none; font-size: 11px; color: var(--fg-2); }
+
+@media (max-width: 640px) {
+    .dlbar-in { flex-wrap: wrap; gap: var(--space-2); }
+    .dlbar-hint { margin-left: 0; width: 100%; }
 }
 </style>

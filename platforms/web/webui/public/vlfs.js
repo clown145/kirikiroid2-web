@@ -25,9 +25,14 @@
     // vlfs-tmp/eN，新页面可能在旧写流收尾期间撞上
     // NoModificationAllowedError。会话隔离保证旧句柄只能锁住旧路径。
     var OPFS_ROOT_DIR = 'vlfs-tmp';
-    var ZIP_CACHE_SCHEMA_VERSION = 1;
+    // v1 是单槽的（一个 state 只记一个 ZIP），换游戏就删掉上一个的解压
+    // 产物。多游戏共存后改为多槽，故抬版本；旧 state 读不出即视为未命中，
+    // 代价只是重解压一次。
+    var ZIP_CACHE_SCHEMA_VERSION = 2;
     var ZIP_CACHE_DIR_PREFIX = 'zip-cache-';
     var ZIP_CACHE_STATE_FILE = 'zip-cache-state.json';
+    // 解压产物按 ZIP 全量存放，槽位太多会吃掉大量配额；超出后按 lastUsed 淘汰
+    var MAX_ZIP_CACHES = 5;
 
     function makeOpfsSessionName() {
         if (typeof crypto !== 'undefined' &&
@@ -76,6 +81,13 @@
         _opfsSessionName: null,
         _statsHit: 0,
         _statsMiss: 0,
+        _statsCacheHit: 0,   // 命中持久字节缓存的读
+        _statsNetwork: 0,    // 实际发出的 Range 请求数
+        // 按需读（引擎真的在等这段字节）的在途计数与最近结束时刻。
+        // 后台下载器据此让路 —— 预取抢了带宽反而让游戏卡顿，是弱网下
+        // 「开了边玩边下更卡」的根因。
+        _demandActive: 0,
+        _demandEndedAt: 0,
         // 写关闭钩子：shell.html 赋值，做 IDB write-through + MEMFS 小文件镜像
         onWriteClose: null,
 
@@ -163,21 +175,29 @@
          * OPFS ZIP 缓存采用“完成标记最后提交”：只有 state 中的指纹、条目
          * 清单与当前 ZIP 一致，且所有解压文件尺寸都正确，才视为命中。
          * 新 ZIP 解压失败时不会覆盖旧 state；下次仍可复用上一个完整缓存。
+         *
+         * v2 起 state 是多槽的（caches: {fingerprint: {...}}）。v1 是单槽，
+         * 换一个游戏就把上一个的解压产物删掉重来 —— 与「多游戏缓存共存 +
+         * 分游戏清理」直接冲突，故 schema 版本一并抬到 2（旧 state 读不出
+         * 就当未命中，代价只是重解压一次）。槽位数量由 _pruneZipCaches
+         * 按 lastUsed 兜底。
          */
         async _prepareZipCache(fingerprint, expectedEntries,
-                               fallbackFingerprint) {
+                               fallbackFingerprint, gameKey) {
             if (!this._opfsRoot || !expectedEntries.length) return null;
-            var state = await this._readOpfsJson(
-                this._opfsRoot, ZIP_CACHE_STATE_FILE);
-            if (state && state.version === ZIP_CACHE_SCHEMA_VERSION &&
-                (state.fingerprint === fingerprint ||
-                 (fallbackFingerprint &&
-                  state.fingerprint === fallbackFingerprint)) &&
-                typeof state.dirName === 'string' &&
-                this._zipCacheEntriesEqual(state.entries, expectedEntries)) {
+            var state = await this._loadZipCacheState();
+
+            var matchedKey = fingerprint;
+            var rec = state.caches[fingerprint];
+            if (!rec && fallbackFingerprint && state.caches[fallbackFingerprint]) {
+                rec = state.caches[fallbackFingerprint];
+                matchedKey = fallbackFingerprint;
+            }
+
+            if (rec && typeof rec.dirName === 'string' &&
+                this._zipCacheEntriesEqual(rec.entries, expectedEntries)) {
                 try {
-                    var hitDir = await this._opfsRoot.getDirectoryHandle(
-                        state.dirName);
+                    var hitDir = await this._opfsRoot.getDirectoryHandle(rec.dirName);
                     var hitFiles = new Map();
                     for (var i = 0; i < expectedEntries.length; i++) {
                         var expected = expectedEntries[i];
@@ -188,25 +208,25 @@
                                 hitFile.size + ' != ' + expected.size);
                         hitFiles.set(expected.file, hitFile);
                     }
-                    if (state.fingerprint !== fingerprint) {
-                        // 旧版本只保存“大小+中央目录”指纹。服务器开始提供
-                        // 完整文件 SHA-256 后，校验旧缓存内容清单并原地迁移
-                        // 完成标记，避免为迁移再次解压数 GB ZIP。
-                        state.fingerprint = fingerprint;
-                        await this._writeOpfsJson(
-                            this._opfsRoot, ZIP_CACHE_STATE_FILE, state);
-                    }
+                    // 旧版本只保存“大小+中央目录”指纹。服务器开始提供
+                    // 完整文件 SHA-256 后，校验旧缓存内容清单并原地迁移
+                    // 槽位键，避免为迁移再次解压数 GB ZIP。
+                    if (matchedKey !== fingerprint) delete state.caches[matchedKey];
+                    rec.lastUsed = Date.now();
+                    if (gameKey) rec.gameKey = gameKey;
+                    state.caches[fingerprint] = rec;
+                    await this._saveZipCacheState(state);
                     console.log('[vlfs] ZIP OPFS cache hit: ' + fingerprint);
                     return {
-                        complete: true, dir: hitDir, dirName: state.dirName,
+                        complete: true, dir: hitDir, dirName: rec.dirName,
                         fingerprint: fingerprint, entries: expectedEntries,
-                        files: hitFiles
+                        files: hitFiles, gameKey: gameKey || null
                     };
                 } catch (e) {
                     console.warn('[vlfs] ZIP OPFS cache invalid:', e);
-                    try {
-                        await this._opfsRoot.removeEntry(ZIP_CACHE_STATE_FILE);
-                    } catch (ignored) {}
+                    delete state.caches[matchedKey];
+                    delete state.caches[fingerprint];
+                    try { await this._saveZipCacheState(state); } catch (ignored) {}
                 }
             }
 
@@ -229,35 +249,84 @@
             return {
                 complete: false, dir: cacheDir, dirName: dirName,
                 fingerprint: fingerprint, entries: expectedEntries,
-                files: new Map()
+                files: new Map(), gameKey: gameKey || null
             };
+        },
+
+        async _loadZipCacheState() {
+            var state = await this._readOpfsJson(
+                this._opfsRoot, ZIP_CACHE_STATE_FILE);
+            if (!state || state.version !== ZIP_CACHE_SCHEMA_VERSION ||
+                !state.caches || typeof state.caches !== 'object') {
+                return { version: ZIP_CACHE_SCHEMA_VERSION, caches: {} };
+            }
+            return state;
+        },
+
+        async _saveZipCacheState(state) {
+            await this._writeOpfsJson(this._opfsRoot, ZIP_CACHE_STATE_FILE, state);
         },
 
         async _commitZipCache(cache) {
             if (!cache || cache.complete || !this._opfsRoot) return;
             // FileSystemWritableFileStream.close() 提交完成后才写 state；因此
             // 崩溃、取消或任一条目解压失败都不会产生可命中的完成标记。
-            await this._writeOpfsJson(this._opfsRoot, ZIP_CACHE_STATE_FILE, {
-                version: ZIP_CACHE_SCHEMA_VERSION,
-                fingerprint: cache.fingerprint,
+            var state = await this._loadZipCacheState();
+            state.caches[cache.fingerprint] = {
                 dirName: cache.dirName,
-                entries: cache.entries
-            });
+                entries: cache.entries,
+                gameKey: cache.gameKey || null,
+                lastUsed: Date.now()
+            };
+            await this._saveZipCacheState(state);
             cache.complete = true;
             console.log('[vlfs] ZIP OPFS cache committed: ' + cache.fingerprint);
+            await this._pruneZipCaches(state, cache.dirName);
+        },
 
-            // 只保留最后一次完整 ZIP 的目录；仍被旧 Document 占用的目录
-            // 删除失败时暂留，后续成功提交时继续回收。
+        /*
+         * 回收两类目录：state 里没有登记的孤儿（上次崩在提交前），以及
+         * 槽位数超过 MAX_ZIP_CACHES 时最久未用的那些。
+         *
+         * 不再像 v1 那样“除当前之外全删” —— 那会让玩 B 游戏时清掉 A 的
+         * 解压产物。仍被旧 Document 占用而删不掉的目录暂留，下次继续回收。
+         */
+        async _pruneZipCaches(state, keepDirName) {
+            var keys = Object.keys(state.caches);
+            if (keys.length > MAX_ZIP_CACHES) {
+                keys.sort(function (a, b) {
+                    return (state.caches[a].lastUsed || 0) - (state.caches[b].lastUsed || 0);
+                });
+                var drop = keys.length - MAX_ZIP_CACHES;
+                for (var i = 0; i < keys.length && drop > 0; i++) {
+                    if (state.caches[keys[i]].dirName === keepDirName) continue;
+                    delete state.caches[keys[i]];
+                    drop--;
+                }
+                try { await this._saveZipCacheState(state); } catch (ignored) {}
+            }
+
+            var live = new Set();
+            for (var k in state.caches) {
+                if (Object.prototype.hasOwnProperty.call(state.caches, k))
+                    live.add(state.caches[k].dirName);
+            }
             for await (var pair of this._opfsRoot.entries()) {
                 var name = pair[0];
                 if (name === ZIP_CACHE_STATE_FILE ||
                     name.indexOf(ZIP_CACHE_DIR_PREFIX) !== 0 ||
-                    name === cache.dirName) continue;
+                    live.has(name)) continue;
                 try {
                     await this._opfsRoot.removeEntry(name, { recursive: true });
                 } catch (ignored) {}
             }
         },
+
+        /*
+         * 按 gameKey 清理 ZIP 解压缓存由 js/storage/cache-admin.js 负责，
+         * 不在这里实现：画廊页要做分游戏清理，但它不加载 vlfs.js。
+         * state 的结构（version/caches/dirName/gameKey）是两者的约定。
+         */
 
         // ---------- 注册（shell.html 调用） ----------
 
@@ -308,10 +377,15 @@
             return e;
         },
 
-        registerRemote(path, url, size, supportsRanges) {
+        /**
+         * cache：可选的 KrKr2CacheStore GameCache。挂上之后本 entry 的
+         * 远程读先查缓存、未命中再走网络并回填。null 即纯按需网络读。
+         */
+        registerRemote(path, url, size, supportsRanges, cache) {
             return this._register(path, {
                 kind: supportsRanges ? 'remote' : 'blob',
-                size: size, url: url, blob: null
+                size: size, url: url, blob: null,
+                cache: cache || null
             });
         },
 
@@ -338,7 +412,10 @@
             return this._registerZipSource(
                 {
                     kind: 'remote', size: size, url: url,
-                    fingerprint: opts && opts.fingerprint
+                    fingerprint: opts && opts.fingerprint,
+                    // 整个 ZIP 的所有条目共享这一个 source，因此缓存也只
+                    // 绑一次；stored 条目的读会经 _readZipSourceBytes 命中
+                    cache: (opts && opts.cache) || null
                 }, opts);
         },
 
@@ -387,7 +464,7 @@
             });
             var zipCache = await this._prepareZipCache(
                 parsed.fingerprint, expectedCacheEntries,
-                parsed.fallbackFingerprint);
+                parsed.fallbackFingerprint, opts.gameKey);
             if (zipCache) {
                 for (var k = 0; k < deflated.length; k++) {
                     var cacheName = expectedCacheEntries[k].file;
@@ -668,18 +745,8 @@
                     var fbuf = await e.file.slice(pos, pos + len).arrayBuffer();
                     return new Uint8Array(fbuf);
                 }
-                case 'remote': {
-                    var resp = await fetch(e.url, {
-                        headers: { 'Range': 'bytes=' + pos + '-' + (pos + len - 1) }
-                    });
-                    if (resp.status !== 206 && resp.status !== 200)
-                        throw new Error('range fetch ' + e.url + ': ' + resp.status);
-                    var rbuf = await resp.arrayBuffer();
-                    // 服务器忽略 Range 返回 200 全量时裁剪
-                    if (resp.status === 200 && rbuf.byteLength > len)
-                        return new Uint8Array(rbuf, pos, len).slice();
-                    return new Uint8Array(rbuf, 0, Math.min(len, rbuf.byteLength)).slice();
-                }
+                case 'remote':
+                    return await this._readRemoteRange(e, pos, len, false);
                 case 'zip': {
                     if (e.method === 0) {
                         if (e.dataOffset < 0) await this._resolveZipDataOffset(e);
@@ -693,6 +760,56 @@
                 default:
                     throw new Error('vlfs: unreadable entry kind ' + e.kind);
             }
+        },
+
+        /*
+         * 远程字节读，优先命中持久缓存。
+         *
+         * target 只需有 {url, cache?}：remote entry 与 zip source 都满足，
+         * 且两者的 pos 都是「源文件绝对偏移」，因此可以共用同一份缓存的
+         * 坐标系 —— zip 里的 stored 条目（xp3-in-zip 的主路径）和整包
+         * xp3 走的是同一套字节缓存，不需要各写一遍。
+         *
+         * strict：ZIP 的结构性读（中央目录、local header）短读即损坏，
+         * 必须抛错；普通文件读在 EOF 附近短读是正常的。
+         */
+        async _readRemoteRange(target, pos, len, strict) {
+            if (target.cache) {
+                try {
+                    var hit = await target.cache.read(pos, len);
+                    if (hit) { this._statsCacheHit++; return hit; }
+                } catch (e) {
+                    // 缓存读失败只降级为走网络，不能让游戏读不到数据
+                    console.warn('[vlfs] cache read failed:', e);
+                }
+            }
+            this._statsNetwork++;
+            this._demandActive++;
+            var resp, rbuf;
+            try {
+                resp = await fetch(target.url, {
+                    headers: { 'Range': 'bytes=' + pos + '-' + (pos + len - 1) }
+                });
+                if (resp.status !== 206 && resp.status !== 200)
+                    throw new Error('range fetch ' + target.url + ': ' + resp.status);
+                rbuf = await resp.arrayBuffer();
+            } finally {
+                this._demandActive--;
+                this._demandEndedAt = Date.now();
+            }
+            var out;
+            if (resp.status === 200 && rbuf.byteLength > len) {
+                // 服务器忽略 Range 返回 200 全量时裁剪
+                out = new Uint8Array(rbuf, pos, len).slice();
+            } else {
+                if (strict && rbuf.byteLength < len)
+                    throw new Error('short range: ' + rbuf.byteLength + ' < ' + len);
+                out = new Uint8Array(rbuf, 0, Math.min(len, rbuf.byteLength)).slice();
+            }
+            if (target.cache && out.length) {
+                try { target.cache.put(pos, out); } catch (e) {}
+            }
+            return out;
         },
 
         // local file header 的 name/extra 长度可能与中央目录不同，须读 local header 定位数据区
@@ -750,17 +867,7 @@
                 var bbuf = await source.blob.slice(pos, pos + len).arrayBuffer();
                 return new Uint8Array(bbuf);
             }
-            var resp = await fetch(source.url, {
-                headers: { 'Range': 'bytes=' + pos + '-' + (pos + len - 1) }
-            });
-            if (resp.status !== 206 && resp.status !== 200)
-                throw new Error('zip range fetch ' + source.url + ': ' + resp.status);
-            var rbuf = await resp.arrayBuffer();
-            if (resp.status === 200 && rbuf.byteLength > len)
-                return new Uint8Array(rbuf, pos, len).slice();
-            if (rbuf.byteLength < len)
-                throw new Error('short zip range: ' + rbuf.byteLength + ' < ' + len);
-            return new Uint8Array(rbuf, 0, len).slice();
+            return await this._readRemoteRange(source, pos, len, true);
         },
 
         async _readZipSourceStream(source, pos, len) {
@@ -869,11 +976,60 @@
             };
         },
 
+        /**
+         * 当前挂载的字节缓存（连同它对应的源地址与大小）。
+         *
+         * 边玩边下必须复用这个对象，不能自己再 open 一次 —— CacheStore.open
+         * 会把同一 gameKey 的旧实例 retire 掉，那正是 VLFS 读路径在用的那个。
+         */
+        activeCache() {
+            for (var pair of this._entries) {
+                var e = pair[1];
+                if (e.cache) return { cache: e.cache, url: e.url, size: e.size };
+                if (e.zipSource && e.zipSource.cache) {
+                    return {
+                        cache: e.zipSource.cache,
+                        url: e.zipSource.url,
+                        size: e.zipSource.size
+                    };
+                }
+            }
+            return null;
+        },
+
+        /**
+         * 引擎是否正在等网络字节。后台下载器每次调度前查询，为真就让路。
+         * quietMs 是按需读结束后的静默期：连续读通常一段接一段，紧贴着
+         * 恢复预取会立刻又抢一次带宽。
+         */
+        demandBusy(quietMs) {
+            if (this._demandActive > 0) return true;
+            var quiet = typeof quietMs === 'number' ? quietMs : 500;
+            return (Date.now() - this._demandEndedAt) < quiet;
+        },
+
         stats() {
+            // 各来源的读次数。cacheHit / network 的比值是预加载是否生效的
+            // 直接指标：命中率上升、network 单调下降才说明缓存在起作用。
+            var active = this.activeCache();
+            var cached = null;
+            if (active) {
+                var c = active.cache;
+                cached = {
+                    gameKey: c.gameKey,
+                    bytes: c.availableBytes(),
+                    size: c.size,
+                    pct: c.size ? Math.min(100, Math.round(c.availableBytes() / c.size * 100)) : 0,
+                    segments: c.ranges.count(),
+                    done: c.isComplete(c.size)
+                };
+            }
             return {
                 entries: this._entries.size,
                 blockCacheBytes: this._blockCacheBytes,
-                hit: this._statsHit, miss: this._statsMiss
+                hit: this._statsHit, miss: this._statsMiss,
+                cacheHit: this._statsCacheHit, network: this._statsNetwork,
+                cache: cached
             };
         }
     };

@@ -1,6 +1,7 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { api } from '../shared/api.js';
+import { getSetting, setSetting } from '../shared/settings.js';
 import { useEngine } from './useEngine.js';
 import { useFullscreen } from './useFullscreen.js';
 import { attachSaveSpace } from './saveSpace.js';
@@ -59,6 +60,45 @@ function exitToGallery() {
     // 整页跳转，不是路由切换：引擎是硬单例，必须靠 Document 销毁
     // 才能释放 Web Lock 和 wasm runtime。
     location.href = '/';
+}
+
+// --- 边玩边下 --------------------------------------------------------
+// 只有库里的游戏（有 game.id）才有持久缓存，因此 cacheState 为 null 时
+// 工具栏根本不显示这个开关。
+const downloadEnabled = ref(getSetting('playWhileDownloading'));
+const cacheState = ref(null);
+let cachePoll = null;
+
+function readCacheState() {
+    const s = window.VLFS?.stats?.().cache;
+    cacheState.value = s || null;
+    return s;
+}
+
+function applyDownloadSetting() {
+    if (!window.KrKr2Cache) return;
+    if (downloadEnabled.value) {
+        window.KrKr2Cache.startPlayDownload({
+            onProgress: () => readCacheState(),
+            onDone: () => readCacheState()
+        });
+    } else {
+        window.KrKr2Cache.stopDownload();
+    }
+    readCacheState();
+}
+
+function toggleDownload() {
+    downloadEnabled.value = !downloadEnabled.value;
+    setSetting('playWhileDownloading', downloadEnabled.value);   // 改动写回全局
+    applyDownloadSetting();
+}
+
+/** 游戏跑起来之后再启动：抢在启动阶段只会拖慢首屏。 */
+function startCacheTracking() {
+    if (!readCacheState()) return;    // 该来源不支持缓存
+    applyDownloadSetting();
+    cachePoll = setInterval(readCacheState, 1000);
 }
 
 // --- canvas 尺寸跟随容器 + devicePixelRatio ---------------------------
@@ -131,6 +171,9 @@ onMounted(async () => {
     window.addEventListener('resize', updateCanvasSize);
     canvas.value.addEventListener('webglcontextlost', onContextLost, false);
 
+    // 画面出来之后才碰缓存：抢在启动阶段跑后台下载只会拖慢首屏
+    watch(phase, (v) => { if (v === 'running') startCacheTracking(); });
+
     // 平台守卫（单例冲突 / JSPI 缺失）优先于一切
     if (window.KrKr2Guards?.fatal) {
         errorInfo.value = window.KrKr2Guards.fatal;
@@ -196,7 +239,11 @@ onMounted(async () => {
         await loadSource({
             type: sourceTypeFor(game.value.downloadUrl),
             url: game.value.downloadUrl.trim(),
-            entry: game.value.entryXp3?.trim() || undefined
+            entry: game.value.entryXp3?.trim() || undefined,
+            // 字节缓存绑不可变的 game.id，与存档空间同理（saveSpace.js）。
+            // ?xp3=/?game= 调试入口不传，它们没有稳定标识，不该进缓存索引。
+            gameKey: game.value.id,
+            title: game.value.title || ''
         }, chooseEntry);
     } catch {
         // 错误已由 useEngine 写入 errorInfo
@@ -206,6 +253,9 @@ onMounted(async () => {
 onUnmounted(() => {
     resizeObserver?.disconnect();
     window.removeEventListener('resize', updateCanvasSize);
+    if (cachePoll) clearInterval(cachePoll);
+    // 停止时把未落盘的进度写回去，下次从洞继续
+    window.KrKr2Cache?.stopDownload();
 });
 </script>
 
@@ -227,7 +277,10 @@ onUnmounted(() => {
             :title="displayTitle"
             :is-fullscreen="isFullscreen"
             :fullscreen-available="fullscreenAvailable"
+            :download-enabled="downloadEnabled"
+            :cache-state="cacheState"
             @exit="exitToGallery"
+            @toggle-download="toggleDownload"
             @toggle-fullscreen="toggleFullscreen"
             @open-saves="showSaves = true" />
 

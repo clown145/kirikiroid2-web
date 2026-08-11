@@ -35,35 +35,19 @@
         return new Blob(segments);
     }
 
-    // 探测远程服务器对 Range 请求的支持。优先 HEAD 查标头；若无标头则用
-    // 1-byte Range (0-0) 探测，防止因跨域 CORS 未 Exposed 标头而误降级为全量下载。
-    async function probeRemoteRange(url) {
-        var ranges = false, size = -1, fingerprint = '';
-        try {
-            var head = await fetch(url, { method: 'HEAD' });
-            if (head.ok) {
-                ranges = (head.headers.get('Accept-Ranges') || '').toLowerCase() === 'bytes';
-                size = parseInt(head.headers.get('Content-Length') || '-1', 10);
-                var contentSha256 = (head.headers.get('X-Content-SHA256') || '').trim().toLowerCase();
-                if (/^[0-9a-f]{64}$/.test(contentSha256)) fingerprint = 'sha256-' + contentSha256;
-            }
-        } catch (e) {}
+    // Range 探测、指纹与缓存打开都在 js/storage/source-probe.js —— 画廊页
+    // 发起完整下载时要用同一套逻辑，但它不加载引擎和这些加载器。
+    var probeRemoteRange = function (url) {
+        return window.KrKr2SourceProbe.probe(url);
+    };
 
-        if (!ranges || size <= 0) {
-            try {
-                var test = await fetch(url, { headers: { 'Range': 'bytes=0-0' } });
-                if (test.status === 206) {
-                    ranges = true;
-                    var cr = test.headers.get('Content-Range'); // e.g. "bytes 0-0/123456"
-                    if (cr) {
-                        var match = cr.match(/\/(\d+)$/);
-                        if (match) size = parseInt(match[1], 10);
-                    }
-                }
-            } catch (e) {}
-        }
-
-        return { ranges: ranges, size: size, fingerprint: fingerprint };
+    function openGameCache(src, url, probe) {
+        return window.KrKr2SourceProbe.openGameCache({
+            gameKey: src.gameKey,
+            title: src.title,
+            url: url,
+            probe: probe
+        });
     }
 
     // ?xp3=：优先 HTTP Range 懒加载；服务器不支持时整包 Blob（仍 off-heap）
@@ -74,7 +58,8 @@
         var probe = await probeRemoteRange(src.url);
 
         if (probe.ranges && probe.size > 0) {
-            VLFS.registerRemote('/data.xp3', src.url, probe.size, true);
+            var cache = await openGameCache(src, src.url, probe);
+            VLFS.registerRemote('/data.xp3', src.url, probe.size, true, cache);
             console.log('[vlfs] remote xp3 (Range lazy-load): ' + src.url + ', ' + probe.size + ' bytes');
         } else {
             report(hooks, 0, 'Downloading game data...');
@@ -106,8 +91,11 @@
         var reg;
         if (probe.ranges && probe.size > 0) {
             report(hooks, 0, 'Reading archive index...');
+            var cache = await openGameCache(src, src.url, probe);
             reg = await VLFS.registerZipRemote(src.url, probe.size, {
                 fingerprint: probe.fingerprint || undefined,
+                cache: cache,
+                gameKey: src.gameKey || null,
                 onProgress: function (done, total, path) {
                     report(hooks, Math.round(done / total * 100),
                         'Extracting (' + done + '/' + total + ') ' + path.substring(1));

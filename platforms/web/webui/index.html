@@ -76,6 +76,15 @@
     <script src="/build-config.js"></script>
     <script src="/js/config.js"></script>
 
+    <!-- 缓存与预下载。画廊页不加载引擎，靠这几支独立操作 OPFS 完成
+         完整下载、用量展示与分游戏清理。range-set 必须在 cache-store 之前。 -->
+    <script src="/js/storage/range-set.js"></script>
+    <script src="/js/storage/cache-store.js"></script>
+    <script src="/js/storage/folder-binding.js"></script>
+    <script src="/js/storage/source-probe.js"></script>
+    <script src="/js/storage/downloader.js"></script>
+    <script src="/js/storage/cache-admin.js"></script>
+
     <!-- 引擎预热：地址取自 engineBase，故必须在 config.js 之后。
          见 <head> 里那条注释。 -->
     <script>

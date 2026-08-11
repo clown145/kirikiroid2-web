@@ -3,18 +3,47 @@ import { ref, computed } from 'vue';
 import { coverSrc } from '../shared/api.js';
 
 const props = defineProps({
-    game: { type: Object, required: true }
+    game: { type: Object, required: true },
+    // 该游戏的持久缓存 {bytes, size, complete}；未缓存过为 null
+    cacheInfo: { type: Object, default: null },
+    // 当前正在下载的就是它时的状态 {pct, running, paused}
+    downloading: { type: Object, default: null }
 });
+
+const emit = defineEmits(['download', 'navigate']);
 
 const failed = ref(false);
 const src = computed(() => (failed.value ? null : coverSrc(props.game)));
 
 // 无封面时用标题首字符占位，比一张通用 icon 更容易区分条目
 const initial = computed(() => (props.game.title || '?').trim().charAt(0).toUpperCase());
+
+const cached = computed(() => !!props.cacheInfo?.complete);
+const partialPct = computed(() => {
+    const c = props.cacheInfo;
+    if (!c || !c.size || c.complete) return 0;
+    return Math.min(99, Math.round((c.bytes / c.size) * 100));
+});
+
+const downloadTitle = computed(() => {
+    if (cached.value) return '已完整下载到本地，游玩时不再消耗流量';
+    if (props.downloading) return '正在下载，点击暂停';
+    if (partialPct.value > 0) return `继续下载（已有 ${partialPct.value}%）`;
+    return '完整下载：先下完再玩，全程无加载等待';
+});
+
+function fmt(bytes) {
+    if (!bytes) return '0 MB';
+    const mb = bytes / 1048576;
+    return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : Math.round(mb) + ' MB';
+}
 </script>
 
 <template>
-    <a class="card" :href="`/play/${encodeURIComponent(game.id)}`">
+    <a
+        class="card"
+        :href="`/play/${encodeURIComponent(game.id)}`"
+        @click="emit('navigate', $event)">
         <div class="cover">
             <img
                 v-if="src"
@@ -34,13 +63,43 @@ const initial = computed(() => (props.game.title || '?').trim().charAt(0).toUppe
             </div>
 
             <span v-if="game.pinned" class="pin" title="置顶">置顶</span>
+
+            <!-- 下载按钮嵌在 <a> 里，必须 stop + prevent，否则点它会跳去玩 -->
+            <button
+                v-if="game.downloadUrl"
+                class="dl-btn"
+                :class="{ cached, active: !!downloading }"
+                type="button"
+                :title="downloadTitle"
+                :aria-label="downloadTitle"
+                @click.prevent.stop="emit('download')">
+                <svg v-if="cached" viewBox="0 0 24 24" fill="currentColor" width="15" height="15" aria-hidden="true">
+                    <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
+                </svg>
+                <svg v-else-if="downloading" viewBox="0 0 24 24" fill="currentColor" width="15" height="15" aria-hidden="true">
+                    <path d="M6 5h4v14H6zM14 5h4v14h-4z" />
+                </svg>
+                <svg v-else viewBox="0 0 24 24" fill="currentColor" width="15" height="15" aria-hidden="true">
+                    <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
+                </svg>
+            </button>
+
+            <!-- 下载中/已部分下载的进度条压在封面底边 -->
+            <div v-if="downloading || partialPct" class="progress">
+                <span :style="{ width: (downloading?.pct ?? partialPct) + '%' }" />
+            </div>
         </div>
 
         <div class="meta">
             <h3 class="title">{{ game.title }}</h3>
             <p v-if="game.description" class="desc">{{ game.description }}</p>
-            <div v-if="game.tags.length" class="tags">
-                <span v-for="tag in game.tags.slice(0, 3)" :key="tag" class="tag">{{ tag }}</span>
+            <div class="foot">
+                <div v-if="game.tags.length" class="tags">
+                    <span v-for="tag in game.tags.slice(0, 3)" :key="tag" class="tag">{{ tag }}</span>
+                </div>
+                <span v-if="cached" class="cache-note" :title="`已缓存 ${fmt(cacheInfo.bytes)}`">已下载</span>
+                <span v-else-if="downloading" class="cache-note on">{{ downloading.pct }}%</span>
+                <span v-else-if="partialPct" class="cache-note">{{ partialPct }}%</span>
             </div>
         </div>
     </a>
@@ -166,4 +225,63 @@ const initial = computed(() => (props.game.title || '?').trim().charAt(0).toUppe
     margin-top: auto;
     padding-top: 2px;
 }
+
+/* 下载入口。常驻而非 hover 才出现 —— 触屏没有 hover，藏起来就点不到。 */
+.dl-btn {
+    position: absolute;
+    top: var(--space-2);
+    right: var(--space-2);
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(8px);
+    color: var(--fg-0);
+    cursor: pointer;
+    opacity: 0.85;
+    transition: opacity var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+
+.dl-btn:hover { opacity: 1; background: rgba(0, 0, 0, 0.85); }
+.dl-btn.cached { color: #6ee7a8; }
+.dl-btn.active { background: rgba(37, 99, 235, 0.9); opacity: 1; }
+
+.progress {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    background: rgba(0, 0, 0, 0.5);
+}
+
+.progress span {
+    display: block;
+    height: 100%;
+    background: var(--fg-0);
+    transition: width 240ms var(--ease);
+}
+
+.foot {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: var(--space-1);
+    margin-top: auto;
+    padding-top: 2px;
+}
+
+.foot .tags { margin-top: 0; padding-top: 0; }
+
+.cache-note {
+    flex: none;
+    font-size: 10px;
+    color: var(--fg-2);
+    white-space: nowrap;
+}
+
+.cache-note.on { color: var(--fg-1); }
 </style>
