@@ -131,6 +131,19 @@
         catch (e) { return String(url || ''); }
     }
 
+    function isManifestSelfReference(url, manifestUrl) {
+        try {
+            var base = typeof document !== 'undefined' ? document.baseURI : undefined;
+            var manifest = new URL(String(manifestUrl), base);
+            var resource = new URL(String(url), manifest);
+            // 查询参数常用于签名或缓存破坏；同源同路径仍是同一个清单文件。
+            return resource.origin === manifest.origin &&
+                resource.pathname === manifest.pathname;
+        } catch (e) {
+            return false;
+        }
+    }
+
     /*
      * 读取 JSON 清单时也走同一份字节缓存。这样完整预下载后播放页只需一次
      * HEAD 校验，不会再把已经下载过的 manifest 本体重新 GET 一遍。
@@ -206,6 +219,10 @@
         var path = normalizeResourcePath(item.name);
         if (path === '/') throw new Error('Game manifest contains an empty resource path');
         var url = resolveResourceUrl(item.url, manifestUrl);
+        if (isManifestSelfReference(url, manifestUrl)) {
+            console.warn('[manifest] 忽略指向清单自身的资源：' + path);
+            return null;
+        }
         var size = Number(item.size);
         var itemProbe;
 

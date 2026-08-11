@@ -24,7 +24,9 @@ resources.set('/assets/config.tjs', config);
 
 const manifestBody = Buffer.from(JSON.stringify([
     { name: 'data.xp3', url: './data.xp3', size: xp3.length },
-    { name: 'assets/config.tjs', url: './assets/config.tjs', size: config.length, ranges: false }
+    { name: 'assets/config.tjs', url: './assets/config.tjs', size: config.length, ranges: false },
+    // 旧生成器会把上一次的 manifest 扫进去，且 size 必然已经过期。
+    { name: 'manifest.json', url: './manifest.json', size: 9779 }
 ]));
 
 let manifestGets = 0;
@@ -192,6 +194,8 @@ try {
     ok(resourceGets === 2, `两个资源各使用一个 GET（实际 ${resourceGets} 条）`);
     ok(resourceRanges === 0, '冷完整下载没有发送 Range 请求');
     ok(manifestGets === 1, 'manifest 本体只 GET 一次');
+    ok(!downloaded.layout.paths.includes('manifest.json'),
+       '清单自引用条目不会进入资源缓存');
     ok(downloaded.layout.dir.startsWith('JSON 缓存测试-'),
        `游戏目录使用标题（${downloaded.layout.dir}）`);
     ok(downloaded.layout.dataSize === xp3.length &&
