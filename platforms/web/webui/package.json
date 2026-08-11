@@ -11,7 +11,7 @@
     "db:local": "wrangler d1 migrations apply krkr2-games --local",
     "db:remote": "wrangler d1 migrations apply krkr2-games --remote",
     "hash-password": "node scripts/hash-password.js",
-    "test": "node scripts/sw-version-pointer-test.mjs && node scripts/smoke-test.mjs && node scripts/offline-test.mjs && node scripts/sw-api-test.mjs && node scripts/savespace-test.mjs && node scripts/prefetch-cache-test.mjs && node scripts/mobile-toolbar-test.mjs",
+    "test": "node scripts/sw-version-pointer-test.mjs && node scripts/vlfs-read-ahead-test.mjs && node scripts/smoke-test.mjs && node scripts/offline-test.mjs && node scripts/sw-api-test.mjs && node scripts/savespace-test.mjs && node scripts/prefetch-cache-test.mjs && node scripts/mobile-toolbar-test.mjs",
     "deploy:local": "npm run build && wrangler deploy"
   },
   "dependencies": {

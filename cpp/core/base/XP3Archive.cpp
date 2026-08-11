@@ -18,6 +18,10 @@
 #include "UtilStreams.h"
 #include "SysInitIntf.h"
 
+#ifdef __EMSCRIPTEN__
+#include "StorageImpl.h"
+#endif
+
 #include <zlib.h>
 #include <algorithm>
 
@@ -802,6 +806,17 @@ struct tTVPClearSegmentCacheCallback : public tTVPCompactEventCallbackIntf {
 
 static bool TVPClearSegmentCacheCallbackInit = false;
 
+#ifdef __EMSCRIPTEN__
+static void TVPSetXP3SegmentReadAheadRange(
+    tTJSBinaryStream *stream, const tTVPXP3ArchiveSegment *segment) {
+    // Android Read@0x8FDA9C consumes one physical segment at a time. The Web
+    // storage boundary preserves that unit so VLFS can issue one HTTP Range
+    // request even when callers consume the logical resource in 256 KiB reads.
+    if(auto *local = dynamic_cast<tTVPLocalFileStream *>(stream))
+        local->SetReadAheadRange(segment->Start, segment->ArcSize);
+}
+#endif
+
 //---------------------------------------------------------------------------
 static tTVPSegmentData *
 TVPSearchFromSegmentCache(const tTVPSegmentCacheSearchData &sdata,
@@ -875,6 +890,10 @@ void tTVPXP3ArchiveStream::EnsureSegment() {
     if(SegmentOpened)
         return;
 
+#ifdef __EMSCRIPTEN__
+    TVPSetXP3SegmentReadAheadRange(Stream, CurSegment);
+#endif
+
     if(LastOpenedSegmentNum == CurSegmentNum) {
         if(!CurSegment->IsCompressed)
             Stream->SetPosition(CurSegment->Start + SegmentPos);
@@ -937,6 +956,10 @@ void tTVPXP3ArchiveStream::EnsureSegmentAsync(tAsyncActionCallback completion) {
             completion(nullptr);
             return;
         }
+
+#ifdef __EMSCRIPTEN__
+        TVPSetXP3SegmentReadAheadRange(Stream, CurSegment);
+#endif
 
         if(LastOpenedSegmentNum == CurSegmentNum) {
             if(!CurSegment->IsCompressed) {

@@ -625,6 +625,27 @@
             return np;
         },
 
+        setReadAhead(fd, offset, length) {
+            var f = this._fds.get(fd);
+            if (!f || f.mode !== 0 || !Number.isFinite(offset) ||
+                !Number.isFinite(length) || offset < 0 || length <= 0)
+                return -1;
+            var end = Math.min(f.entry.size, offset + length);
+            if (end <= offset) return -1;
+            if (f.readAhead && f.readAhead.start === offset &&
+                f.readAhead.end === end) return 0;
+            f.readAhead = {
+                start: offset,
+                end: end,
+                cacheStart: Math.floor(offset / BLOCK_SIZE) * BLOCK_SIZE,
+                cacheEnd: Math.min(
+                    f.entry.size,
+                    Math.ceil(end / BLOCK_SIZE) * BLOCK_SIZE),
+                sources: new WeakMap()
+            };
+            return 0;
+        },
+
         sizeOf(fd) {
             var f = this._fds.get(fd);
             if (!f) return -1;
@@ -694,11 +715,12 @@
                 out = e.data.subarray(f.pos, f.pos + n);
             } else if (n >= DIRECT_READ_THRESHOLD) {
                 // 大读直读源，不污染块缓存
-                out = await this._readSource(e, f.pos, n);
+                out = await this._readSource(e, f.pos, n, f.readAhead);
             } else {
                 var first = Math.floor(f.pos / BLOCK_SIZE);
                 var last = Math.floor((f.pos + n - 1) / BLOCK_SIZE);
-                for (var b = first; b <= last; b++) await this._ensureBlock(e, b);
+                for (var b = first; b <= last; b++)
+                    await this._ensureBlock(e, b, f.readAhead);
                 out = new Uint8Array(n);
                 this._assembleFromBlocks(e, f.pos, out);
             }
@@ -723,12 +745,12 @@
             }
         },
 
-        async _ensureBlock(e, blockIdx) {
+        async _ensureBlock(e, blockIdx, readAhead) {
             var key = e.id + '@' + blockIdx;
             if (this._blockCache.has(key)) return;
             var off = blockIdx * BLOCK_SIZE;
             var n = Math.min(BLOCK_SIZE, e.size - off);
-            var data = await this._readSource(e, off, n);
+            var data = await this._readSource(e, off, n, readAhead);
             if (this._blockCache.has(key)) return; // 并发取块去重（后到丢弃）
             this._blockCache.set(key, data);
             this._blockCacheBytes += data.length;
@@ -758,6 +780,134 @@
             if (data.length !== len)
                 throw new Error('short range ' + data.length + ' < ' + len);
             return data;
+        },
+
+        async _fetchRemoteRangeBlob(source, pos, len) {
+            var resp = await fetch(source.url, {
+                headers: { 'Range': 'bytes=' + pos + '-' + (pos + len - 1) }
+            });
+            if (resp.status !== 206 && resp.status !== 200)
+                throw new Error('range fetch ' + source.url + ': ' + resp.status);
+            var blob = await resp.blob();
+            if (resp.status === 200 && blob.size > len) {
+                if (pos + len > blob.size)
+                    throw new Error('short full response for ' + source.url);
+                blob = blob.slice(pos, pos + len);
+            } else if (blob.size > len) {
+                blob = blob.slice(0, len);
+            }
+            if (blob.size !== len)
+                throw new Error('short range ' + blob.size + ' < ' + len);
+            return blob;
+        },
+
+        _getSourceReadAhead(readAhead, source, baseOffset) {
+            if (!readAhead) return null;
+            var ahead = readAhead.sources.get(source);
+            if (ahead) return ahead;
+
+            var logicalStart = baseOffset + readAhead.cacheStart;
+            var logicalEnd = baseOffset + readAhead.cacheEnd;
+            var fetchStart = Math.floor(logicalStart / BLOCK_SIZE) * BLOCK_SIZE;
+            var fetchEnd = Math.min(
+                source.size, Math.ceil(logicalEnd / BLOCK_SIZE) * BLOCK_SIZE);
+            ahead = {
+                start: logicalStart,
+                end: logicalEnd,
+                fetchStart: fetchStart,
+                fetchEnd: fetchEnd,
+                prepared: null
+            };
+            readAhead.sources.set(source, ahead);
+            return ahead;
+        },
+
+        async _persistReadAheadBlob(cache, start, blocks, blob) {
+            for (var i = 0; i < blocks.length; i++) {
+                var item = blocks[i];
+                if (item.cached) continue;
+                try {
+                    var offset = item.index * BLOCK_SIZE - start;
+                    var data = new Uint8Array(await blob.slice(
+                        offset, offset + item.expected).arrayBuffer());
+                    await window.KrKr2GameCache.writeBlock(
+                        cache, item.index, data);
+                } catch (e) {
+                    console.warn('[vlfs] read-ahead block write failed:', e);
+                }
+            }
+        },
+
+        _prepareRemoteReadAhead(source, ahead) {
+            if (ahead.prepared) return ahead.prepared;
+            if (!source._readAheadLoads) source._readAheadLoads = new Map();
+            var key = ahead.fetchStart + '-' + ahead.fetchEnd;
+            var state = source._readAheadLoads.get(key);
+            if (!state) {
+                var self = this;
+                state = { persistence: null };
+                state.result = (async function () {
+                    var cache = null;
+                    try {
+                        cache = source.cachePromise
+                            ? await source.cachePromise : null;
+                    } catch (ignored) {}
+
+                    var first = Math.floor(ahead.fetchStart / BLOCK_SIZE);
+                    var last = Math.floor((ahead.fetchEnd - 1) / BLOCK_SIZE);
+                    var blocks = [];
+                    var canCheckCache = !!cache &&
+                        !!window.KrKr2GameCache.hasBlock;
+                    var allCached = canCheckCache;
+                    for (var index = first; index <= last; index++) {
+                        var expected = Math.min(
+                            BLOCK_SIZE, source.size - index * BLOCK_SIZE);
+                        var cached = canCheckCache
+                            ? await window.KrKr2GameCache.hasBlock(
+                                cache, index, expected)
+                            : false;
+                        if (!cached) allCached = false;
+                        blocks.push({
+                            index: index, expected: expected, cached: cached
+                        });
+                    }
+
+                    var hitCount = 0;
+                    for (var i = 0; i < blocks.length; i++) {
+                        if (blocks[i].cached) hitCount++;
+                    }
+                    if (cache) {
+                        self._statsPersistentHit += hitCount;
+                        self._statsPersistentMiss += blocks.length - hitCount;
+                    }
+
+                    if (allCached) return { cacheOnly: true };
+
+                    var blob = await self._fetchRemoteRangeBlob(
+                        source, ahead.fetchStart,
+                        ahead.fetchEnd - ahead.fetchStart);
+                    if (cache) {
+                        state.persistence = self._persistReadAheadBlob(
+                            cache, ahead.fetchStart, blocks, blob);
+                        state.persistence.finally(function () {
+                            if (source._readAheadLoads.get(key) === state)
+                                source._readAheadLoads.delete(key);
+                        });
+                    }
+                    return { cacheOnly: false, blob: blob };
+                })();
+                source._readAheadLoads.set(key, state);
+                state.result.then(function () {
+                    if (!state.persistence &&
+                        source._readAheadLoads.get(key) === state)
+                        source._readAheadLoads.delete(key);
+                }, function () {
+                    if (source._readAheadLoads.get(key) === state)
+                        source._readAheadLoads.delete(key);
+                });
+            }
+            ahead.prepared = state.result;
+            return ahead.prepared;
         },
 
         async _loadPersistentRemoteBlock(source, blockIdx) {
@@ -804,7 +954,7 @@
             }
         },
 
-        async _readRemoteBytes(source, pos, len) {
+        async _readRemoteBlocks(source, pos, len) {
             if (!source.cachePromise)
                 return await this._fetchRemoteRange(source, pos, len);
 
@@ -825,7 +975,21 @@
             return out;
         },
 
-        async _readSource(e, pos, len) {
+        async _readRemoteBytes(source, pos, len, ahead) {
+            if (ahead && pos >= ahead.fetchStart &&
+                pos + len <= ahead.fetchEnd) {
+                var prepared = await this._prepareRemoteReadAhead(source, ahead);
+                if (!prepared.cacheOnly) {
+                    var offset = pos - ahead.fetchStart;
+                    var buffer = await prepared.blob.slice(
+                        offset, offset + len).arrayBuffer();
+                    return new Uint8Array(buffer);
+                }
+            }
+            return await this._readRemoteBlocks(source, pos, len);
+        },
+
+        async _readSource(e, pos, len, readAhead) {
             switch (e.kind) {
                 case 'blob': {
                     if (!e.blob) { // registerRemote 的非 Range 降级：懒整包拉取为 Blob
@@ -847,13 +1011,17 @@
                     return new Uint8Array(fbuf);
                 }
                 case 'remote': {
-                    return await this._readRemoteBytes(e, pos, len);
+                    return await this._readRemoteBytes(
+                        e, pos, len,
+                        this._getSourceReadAhead(readAhead, e, 0));
                 }
                 case 'zip': {
                     if (e.method === 0) {
                         if (e.dataOffset < 0) await this._resolveZipDataOffset(e);
                         return await this._readZipSourceBytes(
-                            e.zipSource, e.dataOffset + pos, len);
+                            e.zipSource, e.dataOffset + pos, len,
+                            this._getSourceReadAhead(
+                                readAhead, e.zipSource, e.dataOffset));
                     }
                     await this._ensureOpfsSpill(e);
                     var obuf = await e.opfsFile.slice(pos, pos + len).arrayBuffer();
@@ -914,12 +1082,12 @@
 
         // ---------- ZIP 中央目录解析 ----------
 
-        async _readZipSourceBytes(source, pos, len) {
+        async _readZipSourceBytes(source, pos, len, readAhead) {
             if (source.kind === 'blob') {
                 var bbuf = await source.blob.slice(pos, pos + len).arrayBuffer();
                 return new Uint8Array(bbuf);
             }
-            return await this._readRemoteBytes(source, pos, len);
+            return await this._readRemoteBytes(source, pos, len, readAhead);
         },
 
         async _readZipSourceStream(source, pos, len) {

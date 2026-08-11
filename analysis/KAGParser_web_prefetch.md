@@ -71,6 +71,34 @@ return TJS_S_OK;
 `Application::ProcessMessages()` 中调用 `TVPGetScenario` 并扫描。每个续体都投递成
 下一帧消息，不会在一次剧情推进中批量执行。
 
+### XP3 物理段请求合并
+
+Android `tTVPXP3ArchiveStream::Read@0x8FDA9C` 的实际读取单位是物理 segment：
+
+```text
+EnsureSegment()
+while requested > 0:
+  if current segment exhausted: advance segment; EOF then return
+  one = min(requested, SegmentRemain)
+  compressed ? memcpy(segment cache) : underlyingStream.ReadBuffer(one)
+  run extraction filter when configured
+  advance SegmentPos and CurPos; reduce requested
+return written
+```
+
+本地 `EnsureSegment()` / `EnsureSegmentAsync()` 在打开当前 segment 前，把
+`Start + ArcSize` 作为 Web 存储边界提示传给 `tTVPLocalFileStream`；其余缓存查找、
+压缩段解压、filter 和游标更新顺序不变。VLFS 仍向 C++ 返回原来的 256 KiB 小读，
+但同一提示范围内的首次远程未命中会发一个 Range GET，响应保存为 Blob，后续小读
+只做 Blob slice。为复用既有 256 KiB OPFS 块格式，请求两端向块边界对齐，最多各多取
+不足一个块；后台仍按原块格式持久化，不改变 16 MiB 内存 LRU。
+
+通常图片、语音等一个 XP3 逻辑资源只有一个物理 segment，因此由十几个 GET 降为
+一个 GET。XP3 格式允许一个逻辑资源由多个 segment 组成，这种情况会严格按物理
+segment 各请求一次，而不会把互不连续的归档区间错误合并。stored ZIP 内的 XP3
+会先把 segment 偏移转换为外层 ZIP 的绝对偏移；deflate ZIP 条目仍按原路径先流式
+解压到 OPFS，因为压缩流本身不支持任意区间随机读取。
+
 旧实现用 `WebAssembly.promising(wasmTable.get(callback))` 手工包装普通
 wasm table 回调，但它并不能把整条未导出的 C++ 调用链变成合法 JSPI
 挂起点；冷缓存读取因此会抛异常并使场景队列停死。该包装已删除。

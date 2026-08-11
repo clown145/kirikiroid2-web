@@ -406,6 +406,22 @@
         }
     }
 
+    async function hasBlock(cache, index, expectedSize) {
+        if (!cache) return false;
+        var name = 'b' + index;
+        try {
+            var handle = await cache.blocksDir.getFileHandle(name);
+            var file = await handle.getFile();
+            if (file.size === expectedSize) return true;
+            try { await cache.blocksDir.removeEntry(name); } catch (ignored) {}
+            cache.blockBytes = Math.max(0, cache.blockBytes - expectedSize);
+            queueUsageFlush(cache, 250);
+            return false;
+        } catch (e) {
+            return false;
+        }
+    }
+
     async function writeBlock(cache, index, data) {
         if (!cache || !data || !data.length) return;
         var name = 'b' + index;
@@ -497,6 +513,7 @@
                 return openSourceUnlocked(gameId, descriptor);
             });
         },
+        hasBlock: hasBlock,
         readBlock: readBlock,
         writeBlock: writeBlock,
         setExpandedBytes: setExpandedBytes,

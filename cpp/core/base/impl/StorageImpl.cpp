@@ -976,6 +976,14 @@ void tTVPLocalFileStream::ReadAsync(void *buffer, tjs_uint read_size,
     tTJSBinaryStream::ReadAsync(buffer, read_size, std::move(completion));
 }
 
+#ifdef __EMSCRIPTEN__
+void tTVPLocalFileStream::SetReadAheadRange(tjs_uint64 offset,
+                                             tjs_uint64 length) {
+    if(VlfsFd >= 0)
+        VLFS::SetReadAheadRange(VlfsFd, offset, length);
+}
+#endif
+
 //---------------------------------------------------------------------------
 tjs_uint tTVPLocalFileStream::Write(const void *buffer, tjs_uint write_size) {
     if(MemBuffer) {
