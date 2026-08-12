@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import {
-    Database, FolderOpen, Link as LinkIcon, LogOut, Menu, Settings, Shield
+    Database, FolderOpen, Link as LinkIcon, LogOut, Menu, Settings, Shield, Trash2
 } from '@lucide/vue';
 import { api, accountLoginUrl } from './api.js';
 
@@ -13,6 +13,9 @@ const loading = ref(true);
 const user = ref(null);
 const available = ref({ steam: true, github: false });
 const showMenu = ref(false);
+const showLogoutConfirm = ref(false);
+const loggingOut = ref(false);
+const logoutError = ref('');
 const status = ref('');
 const avatarFailed = ref(false);
 const menuPosition = ref({});
@@ -78,18 +81,45 @@ async function refreshAccount() {
     }
 }
 
-async function logout() {
+function requestLogout() {
+    showMenu.value = false;
+    logoutError.value = '';
+    showLogoutConfirm.value = true;
+}
+
+async function clearLocalSaves() {
+    const idb = window.KrKr2IDB;
+    if (!idb?.listSpaces || !idb?.deleteSpace) {
+        throw new Error('当前浏览器无法读取本地存档');
+    }
+    await idb.whenIdle?.();
+    const spaces = await idb.listSpaces();
+    for (const spaceId of spaces) await idb.deleteSpace(spaceId);
+}
+
+async function logout(clearSaves = false) {
+    if (loggingOut.value) return;
+    loggingOut.value = true;
+    logoutError.value = '';
     try {
+        if (clearSaves) await clearLocalSaves();
         await api.logoutAccount();
         user.value = null;
         showMenu.value = false;
+        showLogoutConfirm.value = false;
     } catch (err) {
-        status.value = err.message || '退出失败';
+        logoutError.value = err.message || '退出失败';
+    } finally {
+        loggingOut.value = false;
     }
 }
 
 function handleKeyDown(event) {
     if (event.key !== 'Escape') return;
+    if (showLogoutConfirm.value && !loggingOut.value) {
+        showLogoutConfirm.value = false;
+        return;
+    }
     showMenu.value = false;
 }
 
@@ -219,7 +249,7 @@ onUnmounted(() => {
                     @click="beginAuth('github', true)">
                     <LinkIcon :size="16" /><span>绑定 GitHub</span>
                 </button>
-                <button class="account-menu-item danger" type="button" @click="logout">
+                <button class="account-menu-item danger" type="button" @click="requestLogout">
                     <LogOut :size="16" /><span>退出登录</span>
                 </button>
             </div>
@@ -227,6 +257,41 @@ onUnmounted(() => {
                 <Shield :size="16" /><span>管理后台</span>
             </a>
         </section>
+
+        <div
+            v-if="showLogoutConfirm"
+            class="logout-backdrop"
+            @click.self="!loggingOut && (showLogoutConfirm = false)">
+            <section
+                class="logout-dialog"
+                role="alertdialog"
+                aria-modal="true"
+                aria-labelledby="logout-title"
+                aria-describedby="logout-description">
+                <h2 id="logout-title">退出账号</h2>
+                <p id="logout-description">要同时清空这台设备上的本地存档吗？</p>
+                <p class="logout-warning">
+                    清空后，尚未同步的进度无法恢复。云端存档、游戏下载缓存和外部游戏文件夹不会被删除。
+                </p>
+                <p v-if="logoutError" class="account-status">{{ logoutError }}</p>
+                <div class="logout-actions">
+                    <button class="btn btn-ghost" type="button" :disabled="loggingOut"
+                        @click="showLogoutConfirm = false">
+                        取消
+                    </button>
+                    <button class="btn btn-primary" type="button" :disabled="loggingOut"
+                        @click="logout(false)">
+                        <LogOut :size="15" aria-hidden="true" />
+                        {{ loggingOut ? '正在退出' : '保留存档并退出' }}
+                    </button>
+                    <button class="btn btn-danger" type="button" :disabled="loggingOut"
+                        @click="logout(true)">
+                        <Trash2 :size="15" aria-hidden="true" />
+                        清空存档并退出
+                    </button>
+                </div>
+            </section>
+        </div>
     </Teleport>
 </template>
 
@@ -364,6 +429,37 @@ onUnmounted(() => {
     line-height: 1.5;
 }
 
+.logout-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: calc(var(--z-modal) + 2);
+    display: grid;
+    place-items: center;
+    padding: var(--space-4);
+    background: rgba(0, 0, 0, .72);
+    backdrop-filter: blur(5px);
+}
+
+.logout-dialog {
+    width: min(440px, 100%);
+    padding: var(--space-5);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    background: var(--bg-1);
+    box-shadow: var(--shadow-lg);
+}
+
+.logout-dialog h2 { margin: 0 0 var(--space-2); font-size: 17px; }
+.logout-dialog > p { margin: 0; color: var(--fg-1); font-size: 13px; line-height: 1.6; }
+.logout-dialog .logout-warning { margin-top: var(--space-3); color: var(--fg-2); font-size: 11px; }
+.logout-actions {
+    display: flex;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-top: var(--space-5);
+}
+
 @media (max-width: 560px) {
     .account-name { display: none; }
     .account-trigger { width: 32px; padding: 3px; }
@@ -381,5 +477,15 @@ onUnmounted(() => {
         box-shadow: var(--shadow-lg);
     }
     .account-menu-item { min-height: 42px; padding: 9px 10px; }
+    .logout-backdrop { align-items: end; padding: 0; }
+    .logout-dialog {
+        width: 100%;
+        padding: var(--space-5) var(--space-4) max(var(--space-4), env(safe-area-inset-bottom));
+        border-width: 1px 0 0;
+        border-radius: var(--radius) var(--radius) 0 0;
+    }
+    .logout-actions { display: grid; grid-template-columns: 1fr; }
+    .logout-actions .btn { justify-content: center; min-height: 42px; }
+    .logout-actions .btn-primary { order: -1; }
 }
 </style>
