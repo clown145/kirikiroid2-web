@@ -48,35 +48,9 @@ function registerServiceWorker() {
             const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
 
             setInterval(() => reg.update(), 30 * 60 * 1000);
-
-            const promptUpdate = (worker) => {
-                if (confirm('有新版本可用，是否重新加载？')) {
-                    worker.postMessage('skipWaiting');
-                }
-            };
-
-            if (reg.waiting) promptUpdate(reg.waiting);
-
-            reg.addEventListener('updatefound', () => {
-                const next = reg.installing;
-                if (!next) return;
-                next.addEventListener('statechange', () => {
-                    if (next.state === 'installed' && navigator.serviceWorker.controller) {
-                        promptUpdate(next);
-                    }
-                });
-            });
         } catch (err) {
             console.warn('[PWA] service worker registration failed:', err);
         }
-
-        let refreshing = false;
-        navigator.serviceWorker.addEventListener('controllerchange', () => {
-            if (!refreshing) {
-                refreshing = true;
-                location.reload();
-            }
-        });
     });
 }
 

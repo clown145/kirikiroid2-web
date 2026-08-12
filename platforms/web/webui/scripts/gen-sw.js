@@ -142,8 +142,6 @@ self.addEventListener('install', function (event) {
                     console.warn('[SW] precache skipped:', asset, err);
                 });
             }));
-        }).then(function () {
-            return self.skipWaiting();
         })
     );
 });
@@ -237,9 +235,6 @@ self.addEventListener('fetch', function (event) {
     }
 });
 
-self.addEventListener('message', function (event) {
-    if (event.data === 'skipWaiting') self.skipWaiting();
-});
 `;
 
 writeFileSync(join(dist, 'sw.js'), sw);
