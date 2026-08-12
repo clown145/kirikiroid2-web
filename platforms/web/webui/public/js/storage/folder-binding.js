@@ -97,11 +97,13 @@
      * 可以在页面加载时直接调用。
      */
     async function tryRestore() {
-        if (bound) return bound;
         if (!supported()) return null;
-        var handle = await idbGet();
+        var handle = bound || await idbGet();
         if (!handle) return null;
-        if (await permission(handle, false) !== 'granted') return null;
+        if (await permission(handle, false) !== 'granted') {
+            bound = null;
+            return null;
+        }
         bound = handle;
         return handle;
     }

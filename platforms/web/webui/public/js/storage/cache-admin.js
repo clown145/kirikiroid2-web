@@ -198,6 +198,11 @@
             throw new Error('下载器未加载');
         }
 
+        var F = window.KrKr2Folder;
+        if (F && F.supported() && await F.hasBinding() && !await F.tryRestore()) {
+            throw window.KrKr2CacheStore.folderPermissionError();
+        }
+
         var type = info.type || sourceTypeForUrl(info.url);
         var prepared;
         if (type === 'json-url') {
@@ -353,7 +358,7 @@
 
         /**
          * 当前存储位置。
-         * kind 'folder' = 用户绑定的磁盘目录（永久，浏览器不会清）；
+         * kind 'folder' = 用户绑定的磁盘目录（needsPermission 表示暂不可访问）；
          * kind 'opfs'   = 浏览器内部存储（存储压力下可能被清除）。
          */
         async storageInfo() {
@@ -373,6 +378,7 @@
                 info.name = handle.name;
             } else if (info.bound) {
                 // 绑过但权限过期：要用户点一下才能恢复，不能静默弹窗
+                info.kind = 'folder';
                 info.needsPermission = true;
                 info.name = await F.name();
             }

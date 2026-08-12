@@ -14,6 +14,8 @@ const DEFAULTS = {
     // 是会下载你可能永远不会看到的分支与结局资源，弱网下还可能与按需读
     // 抢带宽而短期内更卡。这个取舍得由玩家自己做，不能替他选。
     playWhileDownloading: false,
+    // 完整下载前建议绑定自己的文件夹，避免大文件留在可能被清理的 OPFS。
+    downloadFolderPrompt: true,
     // 存档后端：site 使用站点账号和 R2；webdav 由浏览器直连用户的服务。
     saveSyncProvider: 'site',
     // 回到游戏库时只提示存在本地改动，绝不自动上传。

@@ -1,11 +1,15 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import {
-    CircleHelp, Database, FolderOpen, Link as LinkIcon, LogOut, Menu, Settings, Shield, Trash2
+    CircleHelp, Database, FolderOpen, Link as LinkIcon, LogOut, Menu, Settings, Shield,
+    Trash2, TriangleAlert
 } from '@lucide/vue';
 import { api, accountLoginUrl } from './api.js';
 
-defineProps({ cacheTools: { type: Boolean, default: false } });
+defineProps({
+    cacheTools: { type: Boolean, default: false },
+    cacheWarning: { type: Boolean, default: false }
+});
 const emit = defineEmits(['open-cache']);
 
 const root = ref(null);
@@ -161,8 +165,8 @@ onUnmounted(() => {
             class="account-trigger"
             :class="{ guest: !user }"
             type="button"
-            :aria-label="user ? '打开用户菜单' : '打开菜单'"
-            :title="user ? '用户与工具' : '菜单'"
+            :aria-label="cacheWarning ? '打开菜单，本地缓存需要重新授权' : (user ? '打开用户菜单' : '打开菜单')"
+            :title="cacheWarning ? '本地缓存需要重新授权' : (user ? '用户与工具' : '菜单')"
             :aria-expanded="showMenu"
             aria-haspopup="dialog"
             @click="toggleMenu">
@@ -175,6 +179,7 @@ onUnmounted(() => {
                 <span class="account-name">{{ user.displayName }}</span>
             </template>
             <Menu v-else :size="18" aria-hidden="true" />
+            <span v-if="cacheWarning" class="account-warning-dot" aria-hidden="true" />
         </button>
     </div>
 
@@ -229,8 +234,11 @@ onUnmounted(() => {
                 <a class="account-menu-item" href="/help">
                     <CircleHelp :size="16" /><span>帮助与说明</span>
                 </a>
-                <button v-if="cacheTools" class="account-menu-item" type="button" @click="openCache">
+                <button v-if="cacheTools || cacheWarning" class="account-menu-item" type="button" @click="openCache">
                     <Database :size="16" /><span>本地缓存</span>
+                    <span v-if="cacheWarning" class="account-warning-label">
+                        <TriangleAlert :size="13" />需要授权
+                    </span>
                 </button>
                 <a class="account-menu-item" href="/play/local">
                     <FolderOpen :size="16" /><span>打开本地文件</span>
@@ -310,6 +318,7 @@ onUnmounted(() => {
 }
 
 .account-trigger {
+    position: relative;
     height: 32px;
     max-width: 190px;
     display: flex;
@@ -326,6 +335,17 @@ onUnmounted(() => {
 .account-trigger.guest { width: 32px; justify-content: center; padding: 0; }
 
 .account-trigger:hover { background: var(--bg-2); border-color: var(--line-strong); }
+
+.account-warning-dot {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    width: 9px;
+    height: 9px;
+    border: 2px solid var(--bg-0);
+    border-radius: 50%;
+    background: var(--danger);
+}
 
 .account-avatar {
     width: 24px;
@@ -397,6 +417,15 @@ onUnmounted(() => {
 
 .account-menu-item:hover { background: var(--bg-2); }
 .account-menu-item.danger { color: var(--danger); }
+.account-warning-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+    color: var(--danger);
+    font-size: 10px;
+    white-space: nowrap;
+}
 .account-tools + .account-actions { border-top: 1px solid var(--line); margin-top: 5px; padding-top: 5px; }
 .account-admin { margin-top: 5px; border-top: 1px solid var(--line); border-radius: 0 0 6px 6px; color: var(--fg-2); }
 

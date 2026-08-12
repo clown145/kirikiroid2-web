@@ -1,6 +1,8 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { api } from '../shared/api.js';
+import FolderAccessGate from '../shared/FolderAccessGate.vue';
+import { useFolderAccess } from '../shared/folderAccess.js';
 import {
     getSetting,
     setSetting,
@@ -22,6 +24,7 @@ const fatal = ref(null);          // 取游戏元数据阶段的错误
 const showSaves = ref(false);
 const xp3Choices = ref(null);     // 多 xp3 时的候选列表
 let xp3Resolve = null;
+const folderAccess = useFolderAccess();
 
 const { phase, statusText, progress, errorInfo, boot, loadSource } = useEngine();
 const { isFullscreen, toggle: toggleFullscreen, available: fullscreenAvailable } =
@@ -46,6 +49,7 @@ const urlSource = (() => {
 })();
 
 const isLocalMode = !urlSource && (!gameId || gameId === 'local');
+const requiresBoundFolder = !urlSource && !isLocalMode;
 
 const displayTitle = computed(() => {
     if (game.value?.title) return game.value.title;
@@ -57,6 +61,7 @@ const displayTitle = computed(() => {
     return isLocalMode ? '本地文件' : '载入中…';
 });
 const busy = computed(() => phase.value !== 'running' && !errorInfo.value && !fatal.value);
+const folderAccessBlocking = computed(() => requiresBoundFolder && phase.value !== 'running');
 
 const engineBase = () => (window.KrKr2Config?.engineBase) ||
                          (window.KrKr2Config?.assetBase) || '/';
@@ -192,6 +197,11 @@ onMounted(async () => {
         errorInfo.value = window.KrKr2Guards.fatal;
         return;
     }
+
+    // 历史记录或书签可直接进入 /play/<id>。已绑定文件夹失权时必须先
+    // 恢复或明确解除绑定，不能在用户不知情时绕到远程源或 OPFS；这一步
+    // 在 wasm 启动前执行，恢复前不会加载游戏。
+    if (requiresBoundFolder) await folderAccess.requireAccess();
 
     const params = new URLSearchParams(location.search);
     const renderer = window.KrKr2FS.normalizeRenderer(params.get('renderer'));
@@ -331,6 +341,8 @@ onUnmounted(() => {
         </div>
 
         <SaveSpacePanel v-if="showSaves" @close="showSaves = false" />
+
+        <FolderAccessGate :blocking="folderAccessBlocking" />
 
         <!-- 致命错误 -->
         <div v-if="errorInfo || fatal" class="modal-backdrop">

@@ -160,6 +160,13 @@ onMounted(() => {
                 </span>
                 <input type="checkbox" :checked="settings.playWhileDownloading" @change="updateSetting('playWhileDownloading', $event)">
             </label>
+            <label class="setting-row">
+                <span>
+                    <strong>完整下载前建议选择文件夹</strong>
+                    <small>文件夹里的游戏不会随浏览器缓存被清除；关闭后会直接使用浏览器内部存储。</small>
+                </span>
+                <input type="checkbox" :checked="settings.downloadFolderPrompt" @change="updateSetting('downloadFolderPrompt', $event)">
+            </label>
         </section>
 
         <section class="settings-section" aria-labelledby="save-settings">

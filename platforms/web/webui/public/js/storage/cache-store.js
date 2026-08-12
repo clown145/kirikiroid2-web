@@ -26,6 +26,12 @@
         'wsf', 'wsh'
     ]);
 
+    function folderPermissionError() {
+        var error = new Error('已绑定的游戏下载文件夹需要重新授权');
+        error.code = 'folder-permission-required';
+        return error;
+    }
+
     function fnv1a(s) {
         var h = 0x811c9dc5;
         for (var i = 0; i < s.length; i++) {
@@ -267,6 +273,10 @@
             this._pendingBytes += batchBytes;
             this._flushing = [];
             this._flushingBytes = 0;
+            if (this.store.kind === 'folder' && window.KrKr2Folder &&
+                !await window.KrKr2Folder.tryRestore()) {
+                throw folderPermissionError();
+            }
             throw e;
         }
 
@@ -274,7 +284,15 @@
         this._flushing = [];
         this._flushingBytes = 0;
         this._record.downloadedBytes = this._committed;
-        await this.store._noteBytes(this.gameKey, this.resourceId, this._committed);
+        try {
+            await this.store._noteBytes(this.gameKey, this.resourceId, this._committed);
+        } catch (e) {
+            if (this.store.kind === 'folder' && window.KrKr2Folder &&
+                !await window.KrKr2Folder.tryRestore()) {
+                throw folderPermissionError();
+            }
+            throw e;
+        }
     };
 
     /** 用一个完整响应替换当前前缀，供小型 JSON manifest 使用。 */
@@ -664,7 +682,12 @@
             try {
                 var handle = await window.KrKr2Folder.tryRestore();
                 if (handle) return await openFolder(handle);
-            } catch (e) {}
+                if (await window.KrKr2Folder.hasBinding()) {
+                    throw folderPermissionError();
+                }
+            } catch (e) {
+                if (e && e.code === 'folder-permission-required') throw e;
+            }
         }
         return await openOpfs();
     }
@@ -687,6 +710,7 @@
         safeDirName: function (key) { return safeGameDirName(key, key); },
         safeGameDirName: safeGameDirName,
         safeResourcePath: safeResourcePath,
+        folderPermissionError: folderPermissionError,
         COMMIT_BATCH_BYTES: COMMIT_BATCH_BYTES
     };
 })();

@@ -1,11 +1,13 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { Cloud } from '@lucide/vue';
 import { api, coverSrc } from '../shared/api.js';
 import AccountMenu from '../shared/AccountMenu.vue';
 import BackToGallery from '../shared/BackToGallery.vue';
+import DownloadLocationDialog from '../shared/DownloadLocationDialog.vue';
 import SyncPanel from '../shared/SyncPanel.vue';
-import { requestDownloadHandoff } from '../shared/settings.js';
+import { useFolderAccess } from '../shared/folderAccess.js';
+import { getSetting, requestDownloadHandoff, setSetting } from '../shared/settings.js';
 
 const gameId = decodeURIComponent(location.pathname.replace(/^\/game\/?/, ''));
 const game = ref(null);
@@ -20,7 +22,37 @@ const dismissedFolderPrompt = ref(false);
 const account = ref(null);
 const showSync = ref(false);
 const preparingDownload = ref(false);
+const folderAccess = useFolderAccess();
 let pollTimer = null;
+
+watch(folderAccess.version, async () => {
+    await refreshStorage(false);
+    await refreshCache();
+});
+
+watch(folderAccess.needsPermission, () => refreshStorage(false));
+
+function isFolderPermissionError(error) {
+    return error?.code === 'folder-permission-required';
+}
+
+async function waitForFolderAccess(resumeDownload = false) {
+    cacheInfo.value = null;
+    await refreshStorage(false);
+    const result = await folderAccess.requireAccess();
+    await refreshStorage(false);
+    await refreshCache();
+    if (resumeDownload && (result === 'granted' || result === 'unbound')) await beginDownload();
+}
+
+async function refreshStorage(prompt = true) {
+    if (!window.KrKr2Cache) return;
+    storage.value = await window.KrKr2Cache.storageInfo();
+    if (storage.value.needsPermission) {
+        cacheInfo.value = null;
+        if (prompt) folderAccess.prompt();
+    }
+}
 
 const cover = computed(() => (coverFailed.value ? null : coverSrc(game.value)));
 const initial = computed(() => (game.value?.title || '?').trim().charAt(0).toUpperCase());
@@ -53,7 +85,8 @@ async function refreshCache() {
     try {
         const list = await window.KrKr2Cache.list();
         cacheInfo.value = list.find((item) => item.gameKey === game.value.id) || null;
-    } catch {
+    } catch (error) {
+        if (isFolderPermissionError(error)) await refreshStorage(false);
         // 缓存不可用不影响详情页和直接游玩
     }
 }
@@ -80,14 +113,22 @@ async function beginDownload() {
             onError: (error) => {
                 window.KrKr2Cache.stopDownload().finally(async () => {
                     downloading.value = null;
-                    await refreshCache();
-                    alert('下载已停止：' + (error?.message || error || '未知错误'));
+                    if (isFolderPermissionError(error)) {
+                        await waitForFolderAccess(true);
+                    } else {
+                        await refreshCache();
+                        alert('下载已停止：' + (error?.message || error || '未知错误'));
+                    }
                 });
             }
         });
         pollDownload();
     } catch (err) {
-        alert('无法开始下载：' + (err?.message || err));
+        if (isFolderPermissionError(err)) {
+            void waitForFolderAccess(true);
+        } else {
+            alert('无法开始下载：' + (err?.message || err));
+        }
     } finally {
         preparingDownload.value = false;
     }
@@ -114,9 +155,14 @@ async function onDownload() {
         return;
     }
     if (storage.value?.supported && storage.value.kind !== 'folder' &&
-        !dismissedFolderPrompt.value) {
+        getSetting('downloadFolderPrompt') && !dismissedFolderPrompt.value) {
         pendingDownload.value = true;
         preparingDownload.value = false;
+        return;
+    }
+    if (storage.value?.needsPermission) {
+        preparingDownload.value = false;
+        void waitForFolderAccess(true);
         return;
     }
     await beginDownload();
@@ -135,8 +181,17 @@ async function chooseFolder() {
     await beginDownload();
 }
 
-async function skipFolder() {
+function cancelDownloadLocation() {
+    pendingDownload.value = false;
+}
+
+function openCachePermission() {
+    if (folderAccess.needsPermission.value) folderAccess.prompt();
+}
+
+async function skipFolder(dontAskAgain = false) {
     dismissedFolderPrompt.value = true;
+    if (dontAskAgain) setSetting('downloadFolderPrompt', false);
     pendingDownload.value = false;
     await beginDownload();
 }
@@ -151,10 +206,12 @@ async function onPlay(event) {
 }
 
 onMounted(async () => {
+    const storageCheck = refreshStorage(true).catch(() => {});
     try {
         const [loadedGame, accountResult] = await Promise.all([
             api.getGame(gameId),
-            api.getAccount().catch(() => ({ user: null }))
+            api.getAccount().catch(() => ({ user: null })),
+            storageCheck
         ]);
         game.value = loadedGame;
         account.value = accountResult.user || null;
@@ -181,7 +238,9 @@ onUnmounted(() => {
         <BackToGallery />
         <div class="detail-nav-actions">
             <a class="btn btn-ghost btn-sm" href="/settings">设置</a>
-            <AccountMenu />
+            <AccountMenu
+                :cache-warning="folderAccess.needsPermission.value"
+                @open-cache="openCachePermission" />
         </div>
     </header>
 
@@ -269,19 +328,11 @@ onUnmounted(() => {
         </article>
     </main>
 
-    <div v-if="pendingDownload" class="modal" @click.self="pendingDownload = false">
-        <div class="modal-box">
-            <h3>把游戏存到哪里？</h3>
-            <p>
-                选择文件夹可以把游戏保存为磁盘上的普通文件；存浏览器内部则更方便，
-                但设备空间紧张时可能被系统清除。
-            </p>
-            <div class="modal-actions">
-                <button class="btn" @click="skipFolder">存浏览器里</button>
-                <button class="btn btn-primary" @click="chooseFolder">选择文件夹</button>
-            </div>
-        </div>
-    </div>
+    <DownloadLocationDialog
+        v-if="pendingDownload"
+        @cancel="cancelDownloadLocation"
+        @select-folder="chooseFolder"
+        @use-browser="skipFolder" />
 
     <SyncPanel
         v-if="showSync && game"
@@ -429,29 +480,6 @@ onUnmounted(() => {
 .empty h2 { margin: 0 0 var(--space-2); font-size: 17px; }
 .empty p { margin: 0 auto var(--space-5); color: var(--fg-1); font-size: 13px; }
 .detail-empty { max-width: 640px; margin: 0 auto; }
-
-.modal {
-    position: fixed;
-    inset: 0;
-    z-index: var(--z-modal);
-    display: grid;
-    place-items: center;
-    padding: var(--space-4);
-    background: rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(4px);
-}
-
-.modal-box {
-    width: min(440px, 100%);
-    padding: var(--space-4);
-    background: var(--bg-1);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-}
-
-.modal-box h3 { margin: 0 0 var(--space-2); font-size: 15px; }
-.modal-box p { margin: 0 0 var(--space-3); color: var(--fg-1); font-size: 13px; line-height: 1.6; }
-.modal-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 
 @media (max-width: 680px) {
     .detail-nav-actions { gap: var(--space-1); }

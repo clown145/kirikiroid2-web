@@ -1,10 +1,12 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { api } from '../shared/api.js';
 import AccountMenu from '../shared/AccountMenu.vue';
+import DownloadLocationDialog from '../shared/DownloadLocationDialog.vue';
 import SyncPanel from '../shared/SyncPanel.vue';
 import { localSaveSummary } from '../shared/cloudSaves.js';
-import { getSetting } from '../shared/settings.js';
+import { useFolderAccess } from '../shared/folderAccess.js';
+import { getSetting, setSetting } from '../shared/settings.js';
 import GameCard from './GameCard.vue';
 
 const games = ref([]);
@@ -54,7 +56,42 @@ const pendingNav = ref(null);      // 有下载在跑时被拦下的跳转
 const pendingDownload = ref(null); // 等待"存哪里"决定的下载
 const storage = ref(null);         // {kind, name, supported, bound, needsPermission}
 const dismissedFolderPrompt = ref(false);
+const downloadFolderPrompt = ref(getSetting('downloadFolderPrompt'));
+const folderAccess = useFolderAccess();
 let dlPoll = null;
+
+watch(folderAccess.version, async () => {
+    await refreshStorage(false);
+    await refreshCache();
+    if (showCachePanel.value) await refreshUsage();
+});
+
+watch(folderAccess.needsPermission, () => refreshStorage(false));
+
+function isFolderPermissionError(error) {
+    return error?.code === 'folder-permission-required';
+}
+
+async function waitForFolderAccess(game = null) {
+    usage.value = null;
+    cacheMap.value = {};
+    await refreshStorage(false);
+    const result = await folderAccess.requireAccess();
+    await refreshStorage(false);
+    await refreshCache();
+    if (showCachePanel.value) await refreshUsage();
+    if (game && (result === 'granted' || result === 'unbound')) await beginDownload(game);
+}
+
+async function refreshStorage(prompt = true) {
+    if (!window.KrKr2Cache) return;
+    storage.value = await window.KrKr2Cache.storageInfo();
+    if (storage.value.needsPermission) {
+        usage.value = null;
+        cacheMap.value = {};
+        if (prompt) folderAccess.prompt();
+    }
+}
 
 async function refreshCache() {
     if (!window.KrKr2Cache) return;
@@ -63,7 +100,10 @@ async function refreshCache() {
         const map = {};
         for (const g of list) map[g.gameKey] = g;
         cacheMap.value = map;
-    } catch { /* 缓存不可用时画廊照常工作 */ }
+    } catch (error) {
+        if (isFolderPermissionError(error)) await refreshStorage(false);
+        /* 缓存不可用时画廊照常工作 */
+    }
 }
 
 async function refreshUsage() {
@@ -108,9 +148,14 @@ async function onDownload(game) {
         return;
     }
     if (storage.value.supported && storage.value.kind !== 'folder' &&
-        !dismissedFolderPrompt.value) {
+        downloadFolderPrompt.value && !dismissedFolderPrompt.value) {
         pendingDownload.value = game;
         preparingDownload.value = null;
+        return;
+    }
+    if (storage.value.needsPermission) {
+        preparingDownload.value = null;
+        void waitForFolderAccess(game);
         return;
     }
     await beginDownload(game);
@@ -129,14 +174,22 @@ async function beginDownload(game) {
                 const message = error?.message || String(error || '未知错误');
                 window.KrKr2Cache.stopDownload().finally(async () => {
                     dlState.value = null;
-                    await refreshCache();
-                    alert('下载已停止：' + message);
+                    if (isFolderPermissionError(error)) {
+                        await waitForFolderAccess(game);
+                    } else {
+                        await refreshCache();
+                        alert('下载已停止：' + message);
+                    }
                 });
             }
         });
         pollDownload();
     } catch (err) {
-        alert('无法开始下载：' + (err?.message || err));
+        if (isFolderPermissionError(err)) {
+            void waitForFolderAccess(game);
+        } else {
+            alert('无法开始下载：' + (err?.message || err));
+        }
     } finally {
         preparingDownload.value = null;
     }
@@ -157,12 +210,27 @@ async function chooseFolder() {
     if (game) await beginDownload(game);
 }
 
+function cancelDownloadLocation() {
+    pendingDownload.value = null;
+}
+
 /** 选择「暂不，存浏览器里」。本次会话不再追问。 */
-async function skipFolder() {
+async function skipFolder(dontAskAgain = false) {
     dismissedFolderPrompt.value = true;
+    if (dontAskAgain) {
+        setSetting('downloadFolderPrompt', false);
+        downloadFolderPrompt.value = false;
+    }
     const game = pendingDownload.value;
     pendingDownload.value = null;
     if (game) await beginDownload(game);
+}
+
+
+function restoreDownloadLocationPrompt() {
+    setSetting('downloadFolderPrompt', true);
+    downloadFolderPrompt.value = true;
+    dismissedFolderPrompt.value = false;
 }
 
 async function onNavigate(game, event) {
@@ -211,7 +279,7 @@ async function removeAllCache() {
 
 async function openCachePanel() {
     showCachePanel.value = true;
-    storage.value = await window.KrKr2Cache?.storageInfo();
+    await refreshStorage(false);
     await refreshUsage();
     await refreshCache();
 }
@@ -224,6 +292,7 @@ async function bindFolderFromPanel() {
         if (err?.name !== 'AbortError') alert('绑定失败：' + (err?.message || err));
     }
     storage.value = await window.KrKr2Cache.storageInfo();
+    await folderAccess.check({ prompt: false });
     await refreshCache();
     await refreshUsage();
 }
@@ -231,6 +300,7 @@ async function bindFolderFromPanel() {
 async function unbindFolderFromPanel() {
     if (!confirm('不再使用该文件夹？已下载的文件会留在磁盘上，不会被删除。')) return;
     await window.KrKr2Cache.unbindFolder();
+    await folderAccess.check({ prompt: false });
     storage.value = await window.KrKr2Cache.storageInfo();
     dlState.value = null;
     await refreshCache();
@@ -278,6 +348,7 @@ function dismissIntro() {
 onMounted(async () => {
     try { showIntro.value = localStorage.getItem(INTRO_DISMISSED_KEY) !== '1'; }
     catch { showIntro.value = true; }
+    try { await refreshStorage(true); } catch {}
     try {
         games.value = await api.listGames();
     } catch (err) {
@@ -315,7 +386,10 @@ onUnmounted(() => {
             <button class="btn btn-primary btn-sm nav-sync" @click="openSync(true)">
                 <span class="nav-sync-wide">同步全部存档</span><span class="nav-sync-short">同步</span>
             </button>
-            <AccountMenu cache-tools @open-cache="openCachePanel" />
+            <AccountMenu
+                cache-tools
+                :cache-warning="folderAccess.needsPermission.value"
+                @open-cache="openCachePanel" />
         </div>
     </header>
 
@@ -443,26 +517,11 @@ onUnmounted(() => {
         </div>
     </div>
 
-    <!-- 存哪里：点「完整下载」时问一次。这是唯一能让几个 GB 真正留住的入口 -->
-    <div v-if="pendingDownload" class="modal" @click.self="pendingDownload = null">
-        <div class="modal-box">
-            <h3>把游戏存到哪里？</h3>
-            <p>
-                选一个自己的文件夹，下载的游戏就是磁盘上的普通文件 ——
-                浏览器永远不会自动清除，你也能直接拷走或备份。下完之后那个
-                文件就是完整可用的游戏包。
-            </p>
-            <p class="warn">
-                存在浏览器内部则无需授权，但它是临时存储：设备空间紧张时
-                系统可能把它清掉，清理浏览数据也会一并删除。几个 GB 的游戏
-                不建议放那里。
-            </p>
-            <div class="modal-actions">
-                <button class="btn" @click="skipFolder">暂不，存浏览器里</button>
-                <button class="btn btn-primary" @click="chooseFolder">选择文件夹</button>
-            </div>
-        </div>
-    </div>
+    <DownloadLocationDialog
+        v-if="pendingDownload"
+        @cancel="cancelDownloadLocation"
+        @select-folder="chooseFolder"
+        @use-browser="skipFolder" />
 
     <!-- 缓存管理：分游戏清理 -->
     <div v-if="showCachePanel" class="modal" @click.self="showCachePanel = false">
@@ -472,7 +531,7 @@ onUnmounted(() => {
             <div v-if="storage" class="storage-row">
                 <span>
                     存储位置：
-                    <strong v-if="storage.kind === 'folder'">{{ storage.name }}</strong>
+                    <strong v-if="storage.kind === 'folder'">{{ storage.name || '已绑定文件夹' }}</strong>
                     <strong v-else>浏览器内部存储</strong>
                     <em v-if="storage.kind !== 'folder'">（可能被系统清除）</em>
                     <em v-if="storage.needsPermission">（授权已过期，点右侧恢复）</em>
@@ -491,18 +550,28 @@ onUnmounted(() => {
                 </button>
             </div>
 
-            <p v-if="usage" class="usage">
+            <p v-if="storage?.needsPermission" class="usage warn">
+                恢复文件夹访问后才能读取缓存列表和用量。
+            </p>
+            <p v-else-if="usage" class="usage">
                 已占用 {{ fmtBytes(usage.totalBytes) }}
                 <template v-if="usage.limit && isFinite(usage.limit)">
                     / 上限 {{ fmtBytes(usage.limit) }}
                 </template>
                 <template v-if="usage.zipBytes">（其中解压产物 {{ fmtBytes(usage.zipBytes) }}）</template>
             </p>
-            <p class="usage note">
+            <p v-if="!storage?.needsPermission" class="usage note">
                 超出上限时，最久没玩的游戏会被整个清除。绑定文件夹后不受此限制。
             </p>
+            <button
+                v-if="storage?.kind !== 'folder' && !downloadFolderPrompt"
+                class="cache-prompt-reset"
+                type="button"
+                @click="restoreDownloadLocationPrompt">
+                重新开启下载位置提示
+            </button>
 
-            <ul v-if="cachedList.length" class="cache-list">
+            <ul v-if="!storage?.needsPermission && cachedList.length" class="cache-list">
                 <li v-for="c in cachedList" :key="c.gameKey">
                     <span class="cl-title">{{ c.title || c.gameKey }}</span>
                     <span class="cl-size">
@@ -512,7 +581,7 @@ onUnmounted(() => {
                     <button class="btn btn-ghost btn-sm" @click="removeCache(c.gameKey)">清理</button>
                 </li>
             </ul>
-            <p v-else class="usage">还没有缓存任何游戏。</p>
+            <p v-else-if="!storage?.needsPermission" class="usage">还没有缓存任何游戏。</p>
 
             <div class="modal-actions">
                 <button v-if="cachedList.length" class="btn" @click="removeAllCache">全部清理</button>
@@ -805,6 +874,16 @@ onUnmounted(() => {
 
 .usage { font-size: 12px; color: var(--fg-1); }
 .usage.note { color: var(--fg-2); font-size: 11px; }
+
+.cache-prompt-reset {
+    margin: 0 0 var(--space-3);
+    color: var(--fg-1);
+    font-size: 11px;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
+.cache-prompt-reset:hover { color: var(--fg-0); }
 
 .warn {
     padding: var(--space-2);
