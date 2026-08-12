@@ -314,8 +314,7 @@ onUnmounted(() => {
         <!-- 本地文件入口 -->
         <LocalPicker
             v-if="isLocalMode && phase !== 'running' && phase !== 'loading'"
-            @source="startLocalSource"
-            @cancel="exitToGallery" />
+            @source="startLocalSource" />
 
         <!-- 多 xp3 选择 -->
         <div v-if="xp3Choices" class="modal-backdrop">

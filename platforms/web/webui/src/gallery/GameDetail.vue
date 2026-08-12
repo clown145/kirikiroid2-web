@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { Cloud } from '@lucide/vue';
 import { api, coverSrc } from '../shared/api.js';
 import AccountMenu from '../shared/AccountMenu.vue';
+import BackToGallery from '../shared/BackToGallery.vue';
 import SyncPanel from '../shared/SyncPanel.vue';
 import { requestDownloadHandoff } from '../shared/settings.js';
 
@@ -177,15 +178,9 @@ onUnmounted(() => {
 
 <template>
     <header class="nav detail-nav">
-        <a class="brand" href="/">
-            <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20" aria-hidden="true">
-                <path d="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm3-3c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z" />
-            </svg>
-            <span>Kirikiroid2</span>
-        </a>
+        <BackToGallery />
         <div class="detail-nav-actions">
             <a class="btn btn-ghost btn-sm" href="/settings">设置</a>
-            <a class="btn btn-ghost btn-sm" href="/">返回游戏库</a>
             <AccountMenu />
         </div>
     </header>
@@ -196,7 +191,6 @@ onUnmounted(() => {
         <div v-else-if="loadError" class="empty detail-empty">
             <h2>无法打开作品</h2>
             <p>{{ loadError }}</p>
-            <a class="btn" href="/">返回游戏库</a>
         </div>
 
         <article v-else-if="game" class="detail-layout">
@@ -318,16 +312,6 @@ onUnmounted(() => {
     backdrop-filter: blur(16px);
     border-bottom: 1px solid var(--line);
 }
-
-.brand {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: 14px;
-    font-weight: 600;
-}
-
-.brand svg { color: var(--fg-1); }
 
 .detail-layout {
     display: grid;
@@ -470,7 +454,6 @@ onUnmounted(() => {
 .modal-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 
 @media (max-width: 680px) {
-    .detail-nav .brand span { display: none; }
     .detail-nav-actions { gap: var(--space-1); }
     .detail-nav { padding-left: var(--space-4); padding-right: var(--space-4); }
     .detail-body { padding: var(--space-5) var(--space-4) 72px; }

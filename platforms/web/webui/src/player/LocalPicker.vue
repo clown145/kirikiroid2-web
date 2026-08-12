@@ -8,8 +8,9 @@
 //   folder    <input webkitdirectory> 上传的文件夹（拷贝进内存）
 
 import { ref } from 'vue';
+import BackToGallery from '../shared/BackToGallery.vue';
 
-const emit = defineEmits(['source', 'cancel']);
+const emit = defineEmits(['source']);
 
 const dragging = ref(false);
 const errorText = ref('');
@@ -59,45 +60,45 @@ function onDrop(e) {
 
 <template>
     <div class="backdrop">
-        <div class="panel">
-            <header class="head">
+        <header class="local-nav"><BackToGallery /></header>
+        <div class="picker-body">
+            <div class="panel">
                 <h2>打开本地游戏</h2>
-                <button class="btn btn-ghost btn-sm" @click="emit('cancel')">返回游戏库</button>
-            </header>
 
-            <div
-                class="drop"
-                :class="{ active: dragging }"
-                @dragover.prevent="dragging = true"
-                @dragleave="dragging = false"
-                @drop.prevent="onDrop"
-                @click="fileInput.click()">
-                <svg viewBox="0 0 24 24" fill="currentColor" width="26" height="26" aria-hidden="true">
-                    <path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z" />
-                </svg>
-                <p class="drop-title">把 .xp3 或 .zip 拖到这里</p>
-                <p class="hint">也可以点击选择文件</p>
+                <div
+                    class="drop"
+                    :class="{ active: dragging }"
+                    @dragover.prevent="dragging = true"
+                    @dragleave="dragging = false"
+                    @drop.prevent="onDrop"
+                    @click="fileInput.click()">
+                    <svg viewBox="0 0 24 24" fill="currentColor" width="26" height="26" aria-hidden="true">
+                        <path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z" />
+                    </svg>
+                    <p class="drop-title">把 .xp3 或 .zip 拖到这里</p>
+                    <p class="hint">也可以点击选择文件</p>
+                </div>
+
+                <p v-if="errorText" class="err">{{ errorText }}</p>
+
+                <div class="actions">
+                    <button v-if="hasFSA" class="btn btn-primary" @click="pickDirectory">
+                        打开游戏目录
+                    </button>
+                    <button class="btn" @click="fileInput.click()">选择 .xp3</button>
+                    <button class="btn" @click="dirInput.click()">上传文件夹</button>
+                    <button v-if="showZip" class="btn" @click="zipInput.click()">选择 .zip</button>
+                </div>
+
+                <p v-if="hasFSA" class="hint note">
+                    「打开游戏目录」直接读写你选定的文件夹，存档会写回原目录；
+                    其余方式会把文件读进浏览器，存档存在 IndexedDB。
+                </p>
+
+                <input ref="fileInput" type="file" accept=".xp3" hidden @change="onFile($event, 'xp3-file')">
+                <input ref="dirInput" type="file" webkitdirectory hidden @change="onFolder">
+                <input ref="zipInput" type="file" accept=".zip,application/zip,application/x-zip-compressed" hidden @change="onFile($event, 'zip-file')">
             </div>
-
-            <p v-if="errorText" class="err">{{ errorText }}</p>
-
-            <div class="actions">
-                <button v-if="hasFSA" class="btn btn-primary" @click="pickDirectory">
-                    打开游戏目录
-                </button>
-                <button class="btn" @click="fileInput.click()">选择 .xp3</button>
-                <button class="btn" @click="dirInput.click()">上传文件夹</button>
-                <button v-if="showZip" class="btn" @click="zipInput.click()">选择 .zip</button>
-            </div>
-
-            <p v-if="hasFSA" class="hint note">
-                「打开游戏目录」直接读写你选定的文件夹，存档会写回原目录；
-                其余方式会把文件读进浏览器，存档存在 IndexedDB。
-            </p>
-
-            <input ref="fileInput" type="file" accept=".xp3" hidden @change="onFile($event, 'xp3-file')">
-            <input ref="dirInput" type="file" webkitdirectory hidden @change="onFolder">
-            <input ref="zipInput" type="file" accept=".zip,application/zip,application/x-zip-compressed" hidden @change="onFile($event, 'zip-file')">
         </div>
     </div>
 </template>
@@ -107,10 +108,25 @@ function onDrop(e) {
     position: fixed;
     inset: 0;
     z-index: var(--z-modal);
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-0);
+}
+
+.local-nav {
+    min-height: 57px;
+    display: flex;
+    align-items: center;
+    padding: var(--space-3) var(--space-5);
+    border-bottom: 1px solid var(--line);
+}
+
+.picker-body {
+    min-height: 0;
+    flex: 1;
     display: grid;
     place-items: center;
     padding: var(--space-4);
-    background: var(--bg-0);
 }
 
 .panel {
@@ -121,15 +137,7 @@ function onDrop(e) {
     background: var(--bg-1);
 }
 
-.head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
-    margin-bottom: var(--space-4);
-}
-
-.head h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.panel h2 { margin: 0 0 var(--space-4); font-size: 16px; font-weight: 600; }
 
 .drop {
     display: flex;
@@ -162,5 +170,11 @@ function onDrop(e) {
     margin: var(--space-3) 0 0;
     font-size: 12px;
     color: var(--danger);
+}
+
+@media (max-width: 680px) {
+    .local-nav { padding: var(--space-3) var(--space-4); }
+    .picker-body { align-items: start; padding: var(--space-4); }
+    .panel { padding: var(--space-4); }
 }
 </style>

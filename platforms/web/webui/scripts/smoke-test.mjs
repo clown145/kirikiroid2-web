@@ -174,6 +174,8 @@ await visit(`/game/${encodeURIComponent(fixtureId)}`, {
         const panel = await page.evaluate(() => document.querySelector('.sync-panel')?.innerText || '');
         return {
             '详情页保留明确的开始游戏入口': !!(await page.$('.detail-play')),
+            '详情页返回游戏库固定在左侧': !!(await page.$('.detail-nav > .back-to-gallery')),
+            '详情页右侧不再重复返回入口': !(await page.$('.detail-nav-actions > .back-to-gallery')),
             '详情页提供单游戏同步入口': !!(await page.$('.detail-sync')),
             '单游戏同步面板显示当前作品': panel.includes('冒烟测试用条目 · 存档同步'),
             '单游戏同步面板未显示同步全部': !panel.includes('同步全部存档'),
@@ -192,7 +194,7 @@ await visit('/admin', {
         return {
             '显示登录表单': !!(await page.$('input[type="password"]')),
             '未登录不下载后台 chunk': !/GamesAdmin/.test(scripts),
-            '有返回游戏库链接': bodyText.includes('返回游戏库')
+            '返回游戏库固定在左侧': !!(await page.$('.login-nav > .back-to-gallery'))
         };
     }
 });
@@ -217,6 +219,7 @@ await visit('/play/local', {
             'KrKr2IDB 已加载': hasEngine.idb,
             'assetBase 配置存在': hasEngine.config,
             '跨源隔离生效(SharedArrayBuffer 可用)': hasEngine.crossOriginIsolated === true,
+            '本地文件入口返回游戏库固定在左侧': !!(await page.$('.local-nav > .back-to-gallery')),
             '显示本地文件选择器': !!(await page.$('.drop'))
         };
     }

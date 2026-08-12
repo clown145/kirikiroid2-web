@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted } from 'vue';
 import AccountMenu from '../shared/AccountMenu.vue';
+import BackToGallery from '../shared/BackToGallery.vue';
 
 onMounted(() => {
     document.title = '帮助与说明 · 游戏库';
@@ -9,14 +10,8 @@ onMounted(() => {
 
 <template>
     <header class="help-nav">
-        <a class="brand" href="/">
-            <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20" aria-hidden="true">
-                <path d="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm3-3c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z" />
-            </svg>
-            <span>Kirikiroid2</span>
-        </a>
+        <BackToGallery />
         <div class="help-nav-actions">
-            <a class="btn btn-ghost btn-sm" href="/">返回游戏库</a>
             <AccountMenu />
         </div>
     </header>
@@ -151,8 +146,6 @@ onMounted(() => {
 
 <style scoped>
 .help-nav { position: sticky; top: 0; z-index: var(--z-toolbar); display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: var(--space-3) var(--space-5); border-bottom: 1px solid var(--line); background: rgba(10, 10, 11, .86); backdrop-filter: blur(16px); }
-.brand { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; }
-.brand svg { color: var(--fg-1); }
 .help-nav-actions { display: flex; align-items: center; gap: 8px; }
 .help-body { width: min(860px, calc(100% - 32px)); margin: 0 auto; padding: 42px 0 88px; }
 .help-head { padding-bottom: 28px; border-bottom: 1px solid var(--line-strong); }
@@ -186,7 +179,6 @@ onMounted(() => {
 .help-content details p { padding: 0 0 15px; }
 @media (max-width: 680px) {
     .help-nav { padding: var(--space-3) var(--space-4); }
-    .brand span, .help-nav-actions > a { display: none; }
     .help-body { width: min(100% - 24px, 860px); padding-top: 26px; }
     .help-head h1 { font-size: 24px; }
     .help-compare { grid-template-columns: 1fr; }

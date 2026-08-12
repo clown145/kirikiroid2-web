@@ -7,6 +7,7 @@
 
 import { ref, shallowRef, onMounted } from 'vue';
 import { api } from '../shared/api.js';
+import BackToGallery from '../shared/BackToGallery.vue';
 
 const checking = ref(true);
 const authed = ref(false);
@@ -60,6 +61,8 @@ onMounted(async () => {
 </script>
 
 <template>
+    <header v-if="!authed" class="login-nav"><BackToGallery /></header>
+
     <div v-if="checking" class="center-screen"><span class="spinner" /></div>
 
     <component
@@ -90,18 +93,24 @@ onMounted(async () => {
                 <span v-if="submitting" class="spinner sm" />
                 {{ submitting ? '验证中…' : '登录' }}
             </button>
-
-            <a class="back" href="/">← 返回游戏库</a>
         </form>
     </div>
 </template>
 
 <style scoped>
 .center-screen {
-    min-height: 100vh;
+    min-height: calc(100vh - 57px);
     display: grid;
     place-items: center;
     padding: var(--space-4);
+}
+
+.login-nav {
+    min-height: 57px;
+    display: flex;
+    align-items: center;
+    padding: var(--space-3) var(--space-5);
+    border-bottom: 1px solid var(--line);
 }
 
 .login {
@@ -122,13 +131,9 @@ onMounted(async () => {
 
 .err { margin: 0; font-size: 12px; color: var(--danger); line-height: 1.5; }
 
-.back {
-    text-align: center;
-    font-size: 12px;
-    color: var(--fg-2);
-}
-
-.back:hover { color: var(--fg-0); }
-
 .spinner.sm { width: 13px; height: 13px; border-width: 2px; }
+
+@media (max-width: 680px) {
+    .login-nav { padding: var(--space-3) var(--space-4); }
+}
 </style>

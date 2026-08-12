@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue';
 import { api, coverSrc } from '../shared/api.js';
+import BackToGallery from '../shared/BackToGallery.vue';
 
 const emit = defineEmits(['logout']);
 
@@ -195,7 +196,7 @@ onMounted(refresh);
 <template>
     <header class="nav">
         <div class="nav-left">
-            <a class="btn btn-ghost btn-sm" href="/">← 游戏库</a>
+            <BackToGallery />
             <h1>管理后台</h1>
         </div>
         <div class="nav-right">
