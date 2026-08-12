@@ -1,4 +1,7 @@
-// 手动云存档同步状态机。游戏运行期间只标记 dirty，本模块只由用户点击触发。
+// 手动云存档同步状态机。存储后端可为站点 R2 或用户自己的 WebDAV。
+
+import { createWebDavBackend, getWebDavConfig } from './webdav.js';
+import { getSetting } from './settings.js';
 
 const DEVICE_ID_KEY = 'krkr2-save-device-id';
 const DEVICE_NAME_KEY = 'krkr2-save-device-name';
@@ -80,57 +83,120 @@ async function buildArchive(files) {
     return { bytes, sha256: await sha256Hex(bytes) };
 }
 
-export function classifySync(snapshot, remote) {
-    const meta = snapshot.meta || {};
+function targetMeta(meta, targetKey) {
+    if (meta?.targets?.[targetKey]) return meta.targets[targetKey];
+    if (targetKey === 'site') {
+        return {
+            baseRevision: meta?.baseRevision || null,
+            contentHash: meta?.contentHash || null,
+            lastSyncedAt: meta?.lastSyncedAt || null
+        };
+    }
+    return { baseRevision: null, contentHash: null, lastSyncedAt: null };
+}
+
+function syncMetaForTarget(meta, targetKey) {
+    const target = targetMeta(meta, targetKey);
+    return {
+        ...meta,
+        baseRevision: target.baseRevision || null,
+        contentHash: target.contentHash || null,
+        lastSyncedAt: target.lastSyncedAt || null,
+        dirty: !!meta?.dirty || (!!meta?.currentContentHash &&
+            meta.currentContentHash !== target.contentHash)
+    };
+}
+
+export function classifySync(snapshot, remote, targetKey = 'site') {
+    const meta = syncMetaForTarget(snapshot.meta || {}, targetKey);
     if (!remote) return snapshot.files.length || meta.dirty ? 'upload' : 'empty';
-    if (!meta.dirty && meta.contentHash && meta.contentHash === remote.contentHash) return 'same-content';
+    const localHash = snapshot.meta?.currentContentHash || (!meta.dirty ? meta.contentHash : null);
+    if (localHash && localHash === remote.contentHash) return 'same-content';
     if (!meta.baseRevision) return snapshot.files.length || meta.dirty ? 'conflict' : 'download';
     if (meta.baseRevision === remote.id) return meta.dirty ? 'upload' : 'synced';
     return meta.dirty ? 'conflict' : 'download';
 }
 
-export async function listCloudSaves() {
-    return fetchJson('/api/saves');
+function createSiteBackend() {
+    return {
+        kind: 'site',
+        targetKey: 'site',
+        label: '站点云存档',
+        requiresAccount: true,
+        list: () => fetchJson('/api/saves'),
+        async history(gameId) {
+            const data = await fetchJson(`/api/saves/${encodeURIComponent(gameId)}/history`);
+            return data.revisions || [];
+        },
+        async upload(game, archive, metadata, baseRevision) {
+            const headers = {
+                'Content-Type': 'application/zip',
+                'X-KrKr2-Content-Hash': metadata.contentHash,
+                'X-KrKr2-Archive-Sha256': archive.sha256,
+                'X-KrKr2-File-Count': String(metadata.fileCount),
+                'X-KrKr2-Device-Id': metadata.device.id,
+                'X-KrKr2-Device-Name': encodeURIComponent(metadata.device.name)
+            };
+            if (baseRevision) headers['X-KrKr2-Base-Revision'] = baseRevision;
+            const response = await fetch(`/api/saves/${encodeURIComponent(game.id)}/revisions`, {
+                method: 'POST', credentials: 'same-origin', headers, body: archive.bytes
+            });
+            if (!response.ok) return responseError(response);
+            return (await response.json()).revision;
+        },
+        archive(gameId, revision) {
+            return fetch(
+                `/api/saves/${encodeURIComponent(gameId)}/revisions/${encodeURIComponent(revision.id)}/archive`,
+                { credentials: 'same-origin' }
+            ).then((response) => response.ok ? response : responseError(response));
+        },
+        async restore(game, revisionId, device) {
+            const result = await fetchJson(`/api/saves/${encodeURIComponent(game.id)}/restore`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ revisionId, deviceId: device.id, deviceName: device.name })
+            });
+            return result.revision;
+        }
+    };
+}
+
+export function getSyncBackend() {
+    if (getSetting('saveSyncProvider') === 'webdav') {
+        const config = getWebDavConfig();
+        if (!config) throw new Error('请先在设置中配置 WebDAV');
+        return createWebDavBackend(config);
+    }
+    return createSiteBackend();
+}
+
+export function getSyncProviderStatus() {
+    if (getSetting('saveSyncProvider') !== 'webdav') {
+        return { kind: 'site', label: '站点云存档', configured: true, requiresAccount: true };
+    }
+    const config = getWebDavConfig();
+    return {
+        kind: 'webdav',
+        label: config?.name || 'WebDAV',
+        configured: !!config?.url && !!config?.password,
+        requiresAccount: false
+    };
+}
+
+export async function listCloudSaves(games = []) {
+    return getSyncBackend().list(games);
 }
 
 export async function listSaveHistory(gameId) {
-    const data = await fetchJson(`/api/saves/${encodeURIComponent(gameId)}/history`);
-    return data.revisions || [];
+    return getSyncBackend().history(gameId);
 }
 
-async function uploadSnapshot(game, snapshot, baseRevision) {
-    const hash = await contentHash(snapshot.files);
-    const archive = await buildArchive(snapshot.files);
-    const device = getDevice();
-    const headers = {
-        'Content-Type': 'application/zip',
-        'X-KrKr2-Content-Hash': hash,
-        'X-KrKr2-Archive-Sha256': archive.sha256,
-        'X-KrKr2-File-Count': String(snapshot.files.length),
-        'X-KrKr2-Device-Id': device.id,
-        'X-KrKr2-Device-Name': encodeURIComponent(device.name)
-    };
-    if (baseRevision) headers['X-KrKr2-Base-Revision'] = baseRevision;
-    const response = await fetch(`/api/saves/${encodeURIComponent(game.id)}/revisions`, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers,
-        body: archive.bytes
-    });
-    if (!response.ok) return responseError(response);
-    const result = await response.json();
-    await IDB().setSyncMeta(spaceIdForGame(game.id), {
-        dirty: false,
-        baseRevision: result.revision.id,
-        contentHash: result.revision.contentHash,
-        lastSyncedAt: Date.now()
-    });
-    return result.revision;
-}
-
-async function archiveFiles(response) {
+async function archiveFiles(response, expectedSha256 = '') {
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (bytes.byteLength > MAX_RESTORE_BYTES) throw new Error('云端存档过大，已停止恢复');
+    if (expectedSha256 && await sha256Hex(bytes) !== expectedSha256) {
+        throw new Error('云端存档校验失败，文件可能已损坏');
+    }
     const zip = await JSZip.loadAsync(bytes);
     const entries = [];
     zip.forEach((path, entry) => {
@@ -153,18 +219,32 @@ async function archiveFiles(response) {
     return files;
 }
 
-async function fetchArchive(gameId, revisionId) {
-    const response = await fetch(
-        `/api/saves/${encodeURIComponent(gameId)}/revisions/${encodeURIComponent(revisionId)}/archive`,
-        { credentials: 'same-origin' }
-    );
-    if (!response.ok) return responseError(response);
-    return response;
+async function markSynced(spaceId, backend, revision) {
+    await IDB().setSyncTarget(spaceId, backend.targetKey, {
+        baseRevision: revision.id,
+        contentHash: revision.contentHash,
+        lastSyncedAt: Date.now()
+    });
 }
 
-async function applyRemote(game, revision) {
-    const files = await archiveFiles(await fetchArchive(game.id, revision.id));
-    await IDB().replaceFiles(spaceIdForGame(game.id), files, {
+async function uploadSnapshot(backend, game, snapshot, baseRevision) {
+    const hash = await contentHash(snapshot.files);
+    const archive = await buildArchive(snapshot.files);
+    const revision = await backend.upload(game, archive, {
+        contentHash: hash,
+        fileCount: snapshot.files.length,
+        device: getDevice()
+    }, baseRevision);
+    await markSynced(spaceIdForGame(game.id), backend, revision);
+    return revision;
+}
+
+async function applyRemote(backend, game, revision) {
+    const files = await archiveFiles(
+        await backend.archive(game.id, revision),
+        revision.archiveSha256 || ''
+    );
+    await IDB().replaceFilesForTarget(spaceIdForGame(game.id), files, backend.targetKey, {
         baseRevision: revision.id,
         contentHash: revision.contentHash,
         lastSyncedAt: Date.now()
@@ -173,37 +253,34 @@ async function applyRemote(game, revision) {
     return revision;
 }
 
-export async function inspectGameSave(game, remote = null) {
+export async function inspectGameSave(game, remote = null, backend = getSyncBackend()) {
     const spaceId = spaceIdForGame(game.id);
     const snapshot = await IDB().snapshot(spaceId);
-    return { game, spaceId, snapshot, remote, action: classifySync(snapshot, remote) };
+    return { game, spaceId, snapshot, remote, backend, action: classifySync(snapshot, remote, backend.targetKey) };
 }
 
-export async function syncGame(game, remote = null) {
-    const state = await inspectGameSave(game, remote);
+export async function syncGame(game, remote = null, backend = getSyncBackend()) {
+    const state = await inspectGameSave(game, remote, backend);
     if (state.action === 'empty' || state.action === 'synced') {
         return { ...state, result: 'unchanged' };
     }
     if (state.action === 'same-content') {
-        await IDB().setSyncMeta(state.spaceId, {
-            dirty: false,
-            baseRevision: remote.id,
-            contentHash: remote.contentHash,
-            lastSyncedAt: Date.now()
-        });
+        await markSynced(state.spaceId, backend, remote);
         return { ...state, result: 'unchanged' };
     }
     if (state.action === 'download') {
-        await applyRemote(game, remote);
+        await applyRemote(backend, game, remote);
         return { ...state, result: 'downloaded', revision: remote };
     }
     if (state.action === 'upload') {
         try {
-            const revision = await uploadSnapshot(game, state.snapshot, remote?.id || null);
+            const meta = syncMetaForTarget(state.snapshot.meta, backend.targetKey);
+            const revision = await uploadSnapshot(backend, game, state.snapshot,
+                meta.baseRevision || remote?.id || null);
             return { ...state, result: 'uploaded', revision };
         } catch (err) {
-            if (err.status === 409 && err.data?.head) {
-                return { ...state, action: 'conflict', result: 'conflict', remote: err.data.head };
+            if (err.status === 409) {
+                return { ...state, action: 'conflict', result: 'conflict', remote: err.data?.head || err.head || remote };
             }
             throw err;
         }
@@ -211,8 +288,8 @@ export async function syncGame(game, remote = null) {
     return { ...state, result: 'conflict' };
 }
 
-export async function syncAllGames(games, onProgress) {
-    const cloud = await listCloudSaves();
+export async function syncAllGames(games, onProgress, backend = getSyncBackend()) {
+    const cloud = await backend.list(games);
     const heads = new Map((cloud.saves || []).map((revision) => [revision.gameId, revision]));
     const spaces = new Set(await IDB().listSpaces());
     const candidates = games.filter((game) =>
@@ -221,23 +298,26 @@ export async function syncAllGames(games, onProgress) {
     for (let i = 0; i < candidates.length; i++) {
         const game = candidates[i];
         onProgress?.({ index: i, total: candidates.length, game });
-        results.push(await syncGame(game, heads.get(game.id) || null));
+        results.push(await syncGame(game, heads.get(game.id) || null, backend));
     }
     return { results, usage: cloud.usage };
 }
 
 export async function resolveConflictWithLocal(conflictState) {
+    const backend = conflictState.backend || getSyncBackend();
     const snapshot = await IDB().snapshot(spaceIdForGame(conflictState.game.id));
-    return uploadSnapshot(conflictState.game, snapshot, conflictState.remote?.id || null);
+    return uploadSnapshot(backend, conflictState.game, snapshot, conflictState.remote?.id || null);
 }
 
 export async function resolveConflictWithCloud(conflictState) {
-    return applyRemote(conflictState.game, conflictState.remote);
+    const backend = conflictState.backend || getSyncBackend();
+    return applyRemote(backend, conflictState.game, conflictState.remote);
 }
 
 export async function downloadBoth(conflictState) {
+    const backend = conflictState.backend || getSyncBackend();
     await IDB().exportZip(spaceIdForGame(conflictState.game.id));
-    const response = await fetchArchive(conflictState.game.id, conflictState.remote.id);
+    const response = await backend.archive(conflictState.game.id, conflictState.remote);
     const blob = await response.blob();
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
@@ -246,24 +326,31 @@ export async function downloadBoth(conflictState) {
     setTimeout(() => URL.revokeObjectURL(link.href), 0);
 }
 
-export async function restoreHistoricalRevision(game, revisionId) {
-    const device = getDevice();
-    const result = await fetchJson(`/api/saves/${encodeURIComponent(game.id)}/restore`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ revisionId, deviceId: device.id, deviceName: device.name })
-    });
-    await applyRemote(game, result.revision);
-    return result.revision;
+export async function restoreHistoricalRevision(game, revisionId, backend = getSyncBackend()) {
+    const revision = await backend.restore(game, revisionId, getDevice());
+    await applyRemote(backend, game, revision);
+    return revision;
 }
 
-export async function localSaveSummary(games) {
+export async function localSaveSummary(games, backend) {
+    if (backend === undefined) {
+        try { backend = getSyncBackend(); } catch { backend = null; }
+    }
+    const targetKey = backend?.targetKey || null;
     const spaces = new Set(await IDB().listSpaces());
     const rows = [];
     for (const game of games) {
         const spaceId = spaceIdForGame(game.id);
         if (!spaces.has(spaceId)) continue;
         const info = await IDB().getSpaceInfo(spaceId);
+        if (targetKey) {
+            const target = targetMeta(info, targetKey);
+            info.baseRevision = target.baseRevision || null;
+            info.contentHash = target.contentHash || null;
+            info.lastSyncedAt = target.lastSyncedAt || null;
+            info.dirty = !!info.dirty || (!!info.currentContentHash &&
+                info.currentContentHash !== target.contentHash);
+        }
         rows.push({ game, ...info });
     }
     return rows;

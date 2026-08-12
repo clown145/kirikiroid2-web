@@ -4,8 +4,7 @@ import { accountLoginUrl } from './api.js';
 import {
     classifySync,
     downloadBoth,
-    listCloudSaves,
-    listSaveHistory,
+    getSyncBackend,
     localSaveSummary,
     resolveConflictWithCloud,
     resolveConflictWithLocal,
@@ -32,8 +31,11 @@ const conflicts = ref(new Map());
 const historyGame = ref(null);
 const history = ref([]);
 const historyLoading = ref(false);
+const backend = ref(null);
 const returnTo = location.pathname + location.search;
 const singleGame = computed(() => props.games.length === 1 ? props.games[0] : null);
+const needsLogin = computed(() => !!backend.value?.requiresAccount && !props.account);
+const canSync = computed(() => !!backend.value && !needsLogin.value);
 
 const relevantRows = computed(() => rows.value.filter((row) => row.local || row.remote));
 
@@ -56,7 +58,11 @@ function stateFor(row) {
     if (!row.local && row.remote) return { key: 'cloud', label: '仅云端' };
     if (row.local && !row.remote) return { key: 'dirty', label: '待首次同步' };
     if (!row.local && !row.remote) return { key: 'empty', label: '无存档' };
-    const action = classifySync({ files: { length: row.local.count || 0 }, meta: row.local }, row.remote);
+    const action = classifySync(
+        { files: { length: row.local.count || 0 }, meta: row.local },
+        row.remote,
+        backend.value?.targetKey || 'site'
+    );
     if (action === 'conflict') return { key: 'conflict', label: '存在冲突' };
     if (action === 'upload') return { key: 'dirty', label: '本机待同步' };
     if (action === 'download') return { key: 'cloud', label: '云端有更新' };
@@ -65,11 +71,17 @@ function stateFor(row) {
 
 async function refresh() {
     loading.value = true;
+    backend.value = null;
+    cloudUsage.value = null;
+    rows.value = [];
     try {
-        const local = await localSaveSummary(props.games);
+        backend.value = getSyncBackend();
+        const local = await localSaveSummary(props.games, backend.value);
         const localMap = new Map(local.map((row) => [row.game.id, row]));
         let cloud = { saves: [], usage: null };
-        if (props.account) cloud = await listCloudSaves();
+        if (!backend.value.requiresAccount || props.account) {
+            cloud = await backend.value.list(props.games);
+        }
         cloudUsage.value = cloud.usage;
         const remoteMap = new Map((cloud.saves || []).map((revision) => [revision.gameId, revision]));
         rows.value = props.games.map((game) => ({
@@ -85,7 +97,7 @@ async function refresh() {
 }
 
 async function runAll() {
-    if (!props.account || running.value) return;
+    if (!canSync.value || running.value) return;
     running.value = true;
     status.value = '';
     progress.value = '正在检查本机与云端版本…';
@@ -93,7 +105,7 @@ async function runAll() {
     try {
         const result = await syncAllGames(props.games, ({ index, total, game }) => {
             progress.value = `正在同步 ${index + 1} / ${total}：${game.title}`;
-        });
+        }, backend.value);
         const nextConflicts = new Map();
         for (const item of result.results) {
             if (item.result === 'conflict') nextConflicts.set(item.game.id, item);
@@ -120,9 +132,9 @@ async function runOne(row) {
     running.value = true;
     status.value = `正在同步《${row.game.title}》…`;
     try {
-        const cloud = await listCloudSaves();
+        const cloud = await backend.value.list(props.games);
         const remote = (cloud.saves || []).find((item) => item.gameId === row.game.id) || null;
-        const result = await syncGame(row.game, remote);
+        const result = await syncGame(row.game, remote, backend.value);
         if (result.result === 'conflict') {
             const next = new Map(conflicts.value);
             next.set(row.game.id, result);
@@ -144,7 +156,8 @@ async function resolve(row, choice) {
     const conflictState = conflicts.value.get(row.game.id) || {
         game: row.game,
         remote: row.remote,
-        spaceId: spaceIdForGame(row.game.id)
+        spaceId: spaceIdForGame(row.game.id),
+        backend: backend.value
     };
     if (!conflictState.remote || running.value) return;
     if (choice !== 'both') {
@@ -178,7 +191,7 @@ async function openHistory(row) {
     historyGame.value = row.game;
     history.value = [];
     historyLoading.value = true;
-    try { history.value = await listSaveHistory(row.game.id); }
+    try { history.value = await backend.value.history(row.game.id); }
     catch (err) { status.value = err.message || '读取历史失败'; }
     finally { historyLoading.value = false; }
 }
@@ -188,7 +201,7 @@ async function restore(revision) {
     if (!confirm('恢复这个历史版本？它会成为新的最新版本，并替换本机存档。')) return;
     running.value = true;
     try {
-        await restoreHistoricalRevision(historyGame.value, revision.id);
+        await restoreHistoricalRevision(historyGame.value, revision.id, backend.value);
         status.value = '历史版本已恢复为最新版本';
         historyGame.value = null;
         await refresh();
@@ -201,7 +214,7 @@ async function restore(revision) {
 
 onMounted(async () => {
     await refresh();
-    if (props.startImmediately && props.account) await runAll();
+    if (props.startImmediately && canSync.value) await runAll();
 });
 </script>
 
@@ -217,7 +230,7 @@ onMounted(async () => {
                     <button class="btn btn-ghost btn-sm" @click="emit('close')">关闭</button>
                 </header>
 
-                <div v-if="!account" class="sync-login">
+                <div v-if="needsLogin" class="sync-login">
                     <strong>登录后才能同步</strong>
                     <p>本地存档不会受影响。可使用任一账号登录，也可以之后再绑定另一个。</p>
                     <div class="sync-login-actions">
@@ -226,11 +239,19 @@ onMounted(async () => {
                     </div>
                 </div>
 
+                <div v-else-if="!backend" class="sync-login">
+                    <strong>WebDAV 尚未配置</strong>
+                    <p>{{ status || '请先填写 WebDAV 地址、用户名和密码。' }}</p>
+                    <a class="btn btn-primary" href="/settings">前往设置</a>
+                </div>
+
                 <template v-else>
                     <div class="sync-toolbar">
                         <div>
-                            <strong>{{ account.displayName }}</strong>
+                            <strong>{{ backend.label }}</strong>
+                            <span v-if="backend.kind === 'site' && account">{{ account.displayName }}</span>
                             <span v-if="cloudUsage">云端 {{ fmtBytes(cloudUsage.bytes) }} / {{ fmtBytes(cloudUsage.limit) }}</span>
+                            <span v-else-if="backend.kind === 'webdav'">存档直接传输到你的 WebDAV</span>
                         </div>
                         <button class="btn btn-primary" :disabled="running" @click="runAll">
                             <span v-if="running" class="spinner" />

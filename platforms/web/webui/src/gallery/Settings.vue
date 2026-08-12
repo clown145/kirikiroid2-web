@@ -3,8 +3,13 @@ import { computed, onMounted, ref } from 'vue';
 import { api } from '../shared/api.js';
 import AccountMenu from '../shared/AccountMenu.vue';
 import SyncPanel from '../shared/SyncPanel.vue';
-import { getDevice, listCloudSaves, localSaveSummary, setDeviceName } from '../shared/cloudSaves.js';
+import {
+    getDevice, getSyncBackend, getSyncProviderStatus, localSaveSummary, setDeviceName
+} from '../shared/cloudSaves.js';
 import { getSettings, setSetting } from '../shared/settings.js';
+import {
+    clearWebDavConfig, getWebDavConfig, saveWebDavConfig, testWebDavConnection
+} from '../shared/webdav.js';
 
 const settings = ref(getSettings());
 const deviceName = ref(getDevice().name);
@@ -15,6 +20,17 @@ const cloud = ref(null);
 const loading = ref(true);
 const status = ref('');
 const showSync = ref(false);
+const testingWebDav = ref(false);
+const savedWebDav = getWebDavConfig();
+const hasSavedWebDav = ref(!!savedWebDav);
+const webDav = ref({
+    name: savedWebDav?.name || '我的 WebDAV',
+    url: savedWebDav?.url || '',
+    username: savedWebDav?.username || '',
+    password: savedWebDav?.password || '',
+    root: savedWebDav?.root || 'Kirikiroid2',
+    rememberPassword: !!savedWebDav?.rememberPassword
+});
 
 const dirtyCount = computed(() => localRows.value.filter((row) => row.dirty).length);
 const lastSyncedAt = computed(() => Math.max(0, ...localRows.value.map((row) => Number(row.lastSyncedAt || 0))));
@@ -23,9 +39,53 @@ function updateSetting(key, event) {
     settings.value = setSetting(key, event.target.checked);
 }
 
+async function selectSyncProvider(provider) {
+    settings.value = setSetting('saveSyncProvider', provider);
+    status.value = provider === 'webdav' && !getSyncProviderStatus().configured
+        ? '请填写并测试 WebDAV 配置' : '';
+    try { await loadSyncStatus(); }
+    catch (err) { status.value = err.message || '读取同步状态失败'; }
+}
+
 function saveDeviceName() {
     deviceName.value = setDeviceName(deviceName.value).name;
     status.value = '设备名称已保存';
+}
+
+async function saveAndTestWebDav() {
+    if (testingWebDav.value) return;
+    testingWebDav.value = true;
+    status.value = '正在测试 WebDAV 连接…';
+    try {
+        await testWebDavConnection(webDav.value);
+        const config = saveWebDavConfig(webDav.value);
+        webDav.value = { ...config };
+        hasSavedWebDav.value = true;
+        settings.value = setSetting('saveSyncProvider', 'webdav');
+        status.value = 'WebDAV 连接成功，配置已保存';
+        await loadSyncStatus();
+    } catch (err) {
+        status.value = err.message || 'WebDAV 连接失败';
+    } finally {
+        testingWebDav.value = false;
+    }
+}
+
+function removeWebDav() {
+    if (!confirm('删除这台设备上的 WebDAV 配置？远端存档不会被删除。')) return;
+    clearWebDavConfig();
+    hasSavedWebDav.value = false;
+    webDav.value = {
+        name: '我的 WebDAV', url: '', username: '', password: '',
+        root: 'Kirikiroid2', rememberPassword: false
+    };
+    if (settings.value.saveSyncProvider === 'webdav') {
+        settings.value = setSetting('saveSyncProvider', 'site');
+    }
+    status.value = 'WebDAV 配置已删除，远端文件未改动';
+    loadSyncStatus().catch((err) => {
+        status.value = err.message || '读取同步状态失败';
+    });
 }
 
 function fmtBytes(bytes) {
@@ -45,12 +105,21 @@ async function load() {
         const [accountResult, gameList] = await Promise.all([api.getAccount(), api.listGames()]);
         account.value = accountResult.user || null;
         games.value = gameList;
-        localRows.value = await localSaveSummary(gameList);
-        if (account.value) cloud.value = await listCloudSaves();
+        await loadSyncStatus();
     } catch (err) {
         status.value = err.message || '读取设置状态失败';
     } finally {
         loading.value = false;
+    }
+}
+
+async function loadSyncStatus() {
+    cloud.value = null;
+    let backend = null;
+    try { backend = getSyncBackend(); } catch {}
+    localRows.value = await localSaveSummary(games.value, backend);
+    if (backend && (!backend.requiresAccount || account.value)) {
+        cloud.value = await backend.list(games.value);
     }
 }
 
@@ -105,6 +174,70 @@ onMounted(() => {
                 <button class="btn btn-primary" :disabled="loading" @click="showSync = true">管理云存档</button>
             </div>
 
+            <div class="setting-row provider-row">
+                <span>
+                    <strong>同步位置</strong>
+                    <small>站点云存档需要登录；WebDAV 由浏览器直接连接你的服务器。</small>
+                </span>
+                <div class="segmented" role="radiogroup" aria-label="存档同步位置">
+                    <button type="button" role="radio"
+                        :aria-checked="settings.saveSyncProvider === 'site'"
+                        :class="{ active: settings.saveSyncProvider === 'site' }"
+                        @click="selectSyncProvider('site')">
+                        站点云存档
+                    </button>
+                    <button type="button" role="radio"
+                        :aria-checked="settings.saveSyncProvider === 'webdav'"
+                        :class="{ active: settings.saveSyncProvider === 'webdav' }"
+                        @click="selectSyncProvider('webdav')">
+                        WebDAV
+                    </button>
+                </div>
+            </div>
+
+            <div v-if="settings.saveSyncProvider === 'webdav'" class="webdav-settings">
+                <div class="webdav-grid">
+                    <label class="field">
+                        <span>配置名称</span>
+                        <input v-model="webDav.name" class="input" maxlength="80" autocomplete="off">
+                    </label>
+                    <label class="field webdav-url">
+                        <span>WebDAV URL</span>
+                        <input v-model="webDav.url" class="input" type="url"
+                            placeholder="https://dav.example.com/remote.php/dav/files/user" autocomplete="url">
+                    </label>
+                    <label class="field">
+                        <span>用户名</span>
+                        <input v-model="webDav.username" class="input" autocomplete="username">
+                    </label>
+                    <label class="field">
+                        <span>密码</span>
+                        <input v-model="webDav.password" class="input" type="password"
+                            autocomplete="current-password">
+                    </label>
+                    <label class="field webdav-url">
+                        <span>远端目录</span>
+                        <input v-model="webDav.root" class="input" placeholder="Kirikiroid2" autocomplete="off">
+                    </label>
+                </div>
+                <label class="remember-password">
+                    <input v-model="webDav.rememberPassword" type="checkbox">
+                    <span>
+                        <strong>在这台设备上记住密码</strong>
+                        <small>开启后密码会保存在浏览器本地；建议使用 WebDAV 应用专用密码。</small>
+                    </span>
+                </label>
+                <div class="webdav-actions">
+                    <button v-if="hasSavedWebDav" class="btn btn-ghost" type="button"
+                        :disabled="testingWebDav" @click="removeWebDav">删除配置</button>
+                    <button class="btn btn-primary" type="button" :disabled="testingWebDav"
+                        @click="saveAndTestWebDav">
+                        <span v-if="testingWebDav" class="spinner" aria-hidden="true" />
+                        {{ testingWebDav ? '正在测试' : '保存并测试' }}
+                    </button>
+                </div>
+            </div>
+
             <label class="setting-row">
                 <span>
                     <strong>回到游戏库时提醒同步</strong>
@@ -125,10 +258,10 @@ onMounted(() => {
             </div>
 
             <dl class="save-stats">
-                <div><dt>账号</dt><dd>{{ account?.displayName || '未登录' }}</dd></div>
+                <div><dt>同步位置</dt><dd>{{ getSyncProviderStatus().label }}</dd></div>
                 <div><dt>待同步游戏</dt><dd>{{ dirtyCount }}</dd></div>
                 <div><dt>上次同步</dt><dd>{{ fmtTime(lastSyncedAt) }}</dd></div>
-                <div><dt>云端用量</dt><dd>{{ cloud ? `${fmtBytes(cloud.usage.bytes)} / ${fmtBytes(cloud.usage.limit)}` : '登录后查看' }}</dd></div>
+                <div><dt>云端用量</dt><dd>{{ cloud?.usage ? `${fmtBytes(cloud.usage.bytes)} / ${fmtBytes(cloud.usage.limit)}` : '由存储服务管理' }}</dd></div>
             </dl>
         </section>
 
@@ -158,6 +291,20 @@ onMounted(() => {
 .setting-row small { color: var(--fg-2); font-size: 11px; line-height: 1.55; }
 .setting-row input[type="checkbox"] { width: 36px; height: 20px; flex: none; accent-color: var(--accent); }
 .device-input { width: min(360px, 50%); display: flex; gap: 8px; }
+.provider-row { align-items: center; }
+.segmented { display: grid; grid-template-columns: 1fr 1fr; flex: none; padding: 3px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg-2); }
+.segmented button { min-height: 32px; padding: 5px 12px; border-radius: 5px; color: var(--fg-2); font-size: 12px; white-space: nowrap; }
+.segmented button.active { background: var(--fg-0); color: var(--bg-0); }
+.webdav-settings { padding: 18px 0; border-top: 1px solid var(--line); }
+.webdav-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.webdav-grid .field > span { color: var(--fg-1); font-size: 11px; font-weight: 500; }
+.webdav-url { grid-column: 1 / -1; }
+.remember-password { display: flex; align-items: flex-start; gap: 10px; margin-top: 16px; }
+.remember-password input { width: 17px; height: 17px; margin: 1px 0 0; accent-color: var(--accent); }
+.remember-password span { display: flex; flex-direction: column; gap: 3px; }
+.remember-password strong { font-size: 12px; }
+.remember-password small { color: var(--fg-2); font-size: 10px; line-height: 1.5; }
+.webdav-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .save-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; padding: 16px 0; border-top: 1px solid var(--line); }
 .save-stats div { min-width: 0; padding-right: 16px; }
 .save-stats dt { margin-bottom: 5px; color: var(--fg-2); font-size: 10px; }
@@ -172,6 +319,12 @@ onMounted(() => {
     .setting-row { gap: 14px; }
     .device-row { flex-direction: column; }
     .device-input { width: 100%; }
+    .provider-row { flex-direction: column; }
+    .segmented { width: 100%; }
+    .webdav-grid { grid-template-columns: 1fr; }
+    .webdav-url { grid-column: auto; }
+    .webdav-actions { display: grid; grid-template-columns: 1fr; }
+    .webdav-actions .btn { justify-content: center; }
     .save-stats { grid-template-columns: 1fr 1fr; gap: 18px 10px; }
 }
 </style>

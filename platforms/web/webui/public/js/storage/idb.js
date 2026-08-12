@@ -17,8 +17,27 @@
             baseRevision: null,
             contentHash: null,
             modifiedAt: null,
-            lastSyncedAt: null
+            lastSyncedAt: null,
+            currentContentHash: null,
+            targets: {}
         };
+    }
+
+    function normalizeSyncMeta(stored) {
+        var meta = Object.assign(defaultSyncMeta(), stored || {});
+        meta.targets = Object.assign({}, meta.targets || {});
+        // v2 只支持站点云存档。保留旧字段，并把它视为 site 目标的初始基线。
+        if (!meta.targets.site && (meta.baseRevision || meta.contentHash || meta.lastSyncedAt)) {
+            meta.targets.site = {
+                baseRevision: meta.baseRevision || null,
+                contentHash: meta.contentHash || null,
+                lastSyncedAt: meta.lastSyncedAt || null
+            };
+        }
+        if (!meta.currentContentHash && !meta.dirty && meta.contentHash) {
+            meta.currentContentHash = meta.contentHash;
+        }
+        return meta;
     }
 
     function upgradeDatabase(db) {
@@ -76,8 +95,9 @@
             var metaStore = tx.objectStore('meta');
             var req = metaStore.get(SYNC_META_KEY);
             req.onsuccess = function () {
-                metaStore.put(Object.assign(defaultSyncMeta(), req.result || {}, {
+                metaStore.put(Object.assign(normalizeSyncMeta(req.result), {
                     dirty: true,
+                    currentContentHash: null,
                     modifiedAt: Date.now()
                 }), SYNC_META_KEY);
             };
@@ -114,7 +134,7 @@
             var countReq = tx.objectStore('files').count();
             tx.oncomplete = function () {
                 var stored = metaReq.result;
-                resolve(Object.assign(defaultSyncMeta(), stored || {}, {
+                resolve(Object.assign(normalizeSyncMeta(stored), {
                     // v1 数据没有 meta；只要已有文件，就应视为从未上传的本地变化。
                     dirty: stored ? !!stored.dirty : (countReq.result || 0) > 0
                 }));
@@ -152,25 +172,100 @@
     function idbSetSyncMeta(spaceId, patch) {
         return withSpace(spaceId, async function (db) {
             var current = await readMetaFromDatabase(db);
+            var next = Object.assign({}, current, patch || {});
+            if (patch && ('baseRevision' in patch || 'contentHash' in patch ||
+                'lastSyncedAt' in patch)) {
+                var targets = Object.assign({}, current.targets || {});
+                targets.site = Object.assign({}, targets.site || {}, {
+                    baseRevision: patch.baseRevision || null,
+                    contentHash: patch.contentHash || null,
+                    lastSyncedAt: patch.lastSyncedAt || null
+                });
+                next.targets = targets;
+                if (patch.dirty === false && patch.contentHash) {
+                    next.currentContentHash = patch.contentHash;
+                }
+            }
             var tx = db.transaction('meta', 'readwrite');
-            tx.objectStore('meta').put(Object.assign(current, patch || {}), SYNC_META_KEY);
+            tx.objectStore('meta').put(next, SYNC_META_KEY);
             await transactionDone(tx);
-            return Object.assign(current, patch || {});
+            return next;
+        });
+    }
+
+    function idbSetSyncTarget(spaceId, targetKey, patch) {
+        return withSpace(spaceId, async function (db) {
+            var current = await readMetaFromDatabase(db);
+            var targets = Object.assign({}, current.targets || {});
+            targets[targetKey] = Object.assign({}, targets[targetKey] || {}, patch || {});
+            var next = Object.assign({}, current, {
+                dirty: false,
+                currentContentHash: patch?.contentHash || current.currentContentHash || null,
+                targets: targets
+            });
+            if (targetKey === 'site') {
+                next.baseRevision = patch?.baseRevision || null;
+                next.contentHash = patch?.contentHash || null;
+                next.lastSyncedAt = patch?.lastSyncedAt || null;
+            }
+            var tx = db.transaction('meta', 'readwrite');
+            tx.objectStore('meta').put(next, SYNC_META_KEY);
+            await transactionDone(tx);
+            return next;
         });
     }
 
     function idbReplaceFiles(spaceId, files, syncMeta) {
         return withSpace(spaceId, async function (db) {
+            var current = await readMetaFromDatabase(db);
+            var targets = Object.assign({}, current.targets || {});
+            if (syncMeta && ('baseRevision' in syncMeta || 'contentHash' in syncMeta ||
+                'lastSyncedAt' in syncMeta)) {
+                targets.site = {
+                    baseRevision: syncMeta.baseRevision || null,
+                    contentHash: syncMeta.contentHash || null,
+                    lastSyncedAt: syncMeta.lastSyncedAt || null
+                };
+            }
             var tx = db.transaction(['files', 'meta'], 'readwrite');
             var store = tx.objectStore('files');
             store.clear();
             for (var i = 0; i < files.length; i++) {
                 store.put(new Uint8Array(files[i].data), files[i].path);
             }
-            tx.objectStore('meta').put(Object.assign(defaultSyncMeta(), syncMeta || {}, {
+            tx.objectStore('meta').put(Object.assign({}, current, syncMeta || {}, {
                 dirty: !!syncMeta?.dirty,
+                currentContentHash: syncMeta?.dirty ? null : (syncMeta?.contentHash || null),
                 modifiedAt: Date.now(),
-                lastSyncedAt: syncMeta?.dirty ? null : Date.now()
+                lastSyncedAt: syncMeta?.dirty ? null : (syncMeta?.lastSyncedAt || Date.now()),
+                targets: targets
+            }), SYNC_META_KEY);
+            await transactionDone(tx);
+        });
+    }
+
+    function idbReplaceFilesForTarget(spaceId, files, targetKey, targetMeta) {
+        return withSpace(spaceId, async function (db) {
+            var current = await readMetaFromDatabase(db);
+            var targets = Object.assign({}, current.targets || {});
+            targets[targetKey] = Object.assign({}, targets[targetKey] || {}, targetMeta || {});
+            var tx = db.transaction(['files', 'meta'], 'readwrite');
+            var store = tx.objectStore('files');
+            store.clear();
+            for (var i = 0; i < files.length; i++) {
+                store.put(new Uint8Array(files[i].data), files[i].path);
+            }
+            tx.objectStore('meta').put(Object.assign({}, current, {
+                dirty: false,
+                currentContentHash: targetMeta?.contentHash || null,
+                modifiedAt: Date.now(),
+                targets: targets,
+                baseRevision: targetKey === 'site'
+                    ? (targetMeta?.baseRevision || null) : current.baseRevision,
+                contentHash: targetKey === 'site'
+                    ? (targetMeta?.contentHash || null) : current.contentHash,
+                lastSyncedAt: targetKey === 'site'
+                    ? (targetMeta?.lastSyncedAt || null) : current.lastSyncedAt
             }), SYNC_META_KEY);
             await transactionDone(tx);
         });
@@ -230,7 +325,9 @@
                 dirty: meta.dirty,
                 baseRevision: meta.baseRevision,
                 contentHash: meta.contentHash,
-                lastSyncedAt: meta.lastSyncedAt
+                lastSyncedAt: meta.lastSyncedAt,
+                currentContentHash: meta.currentContentHash,
+                targets: meta.targets
             };
         }).catch(function () {
             return { count: 0, size: 0, dirty: false, baseRevision: null,
@@ -286,7 +383,9 @@
         snapshot: idbSnapshot,
         getSyncMeta: idbGetSyncMeta,
         setSyncMeta: idbSetSyncMeta,
+        setSyncTarget: idbSetSyncTarget,
         replaceFiles: idbReplaceFiles,
+        replaceFilesForTarget: idbReplaceFilesForTarget,
         whenIdle: idbWhenIdle,
         listSpaces: idbListSpaces,
         registerSpace: idbRegisterSpace,
