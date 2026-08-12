@@ -130,8 +130,9 @@ await visit('/', {
             '未登录菜单同时提供 Steam 与 GitHub':
                 account.providers.some((v) => v.includes('Steam')) &&
                 account.providers.some((v) => v.includes('GitHub')),
-            '未登录菜单明确本地游玩无需登录': account.menu.includes('本地游玩无需登录'),
-            '工具入口已收纳进菜单': ['设置与云存档', '本地缓存', '打开本地文件', '管理后台']
+            '未登录菜单明确本地游玩和 WebDAV 无需登录':
+                account.menu.includes('本地游玩和 WebDAV 无需登录'),
+            '工具入口已收纳进菜单': ['设置与存档同步', '帮助与说明', '本地缓存', '打开本地文件', '管理后台']
                 .every((label) => account.tools.includes(label)),
             '画廊没有水平溢出': account.viewportFits,
             // 引擎地址必须取自 engineBase，不能写死。启用 KRKR2_ENGINE_BASE 后
@@ -148,6 +149,24 @@ await visit('/', {
     }
 });
 
+// --- 帮助页：复用轻量画廊入口，不加载引擎 ---
+await visit('/help', {
+    assert: async (page) => {
+        const bodyText = await page.evaluate(() => document.body.innerText);
+        return {
+            '显示帮助页标题': (await page.$eval('h1', (e) => e.textContent).catch(() => '')) === '帮助与说明',
+            '说明两种同步位置': bodyText.includes('站点云存档') && bodyText.includes('WebDAV'),
+            '说明同步不会自动上传': bodyText.includes('都不会自动上传'),
+            '列出 WebDAV CORS 要求': bodyText.includes('Access-Control-Expose-Headers') && bodyText.includes('ETag'),
+            '明确 iOS 因缺少 JSPI 无法运行':
+                bodyText.includes('iPhone 和 iPad 当前无法运行游戏') &&
+                bodyText.includes('安装 iOS 版 Chrome、Edge 或 Firefox 也无法绕过'),
+            '帮助页没有水平溢出': await page.evaluate(() =>
+                document.documentElement.scrollWidth <= document.documentElement.clientWidth)
+        };
+    }
+});
+
 // --- 游戏详情：卡片进入这里后才提供游玩与单游戏同步 ---
 await visit(`/game/${encodeURIComponent(fixtureId)}`, {
     assert: async (page) => {
@@ -156,7 +175,7 @@ await visit(`/game/${encodeURIComponent(fixtureId)}`, {
         return {
             '详情页保留明确的开始游戏入口': !!(await page.$('.detail-play')),
             '详情页提供单游戏同步入口': !!(await page.$('.detail-sync')),
-            '单游戏同步面板显示当前作品': panel.includes('冒烟测试用条目 · 云存档'),
+            '单游戏同步面板显示当前作品': panel.includes('冒烟测试用条目 · 存档同步'),
             '单游戏同步面板未显示同步全部': !panel.includes('同步全部存档'),
             '未登录也能打开同步面板并看到登录入口':
                 panel.includes('登录后才能同步') && panel.includes('Steam') && panel.includes('GitHub')

@@ -282,8 +282,10 @@ npm test
 
 ## 已知边界
 
-- **iOS Safari 无元素全屏**，降级为伪全屏（铺满视口 + `viewport-fit=cover`），
-  地址栏无法隐藏。想要真全屏只能"添加到主屏幕"走 PWA standalone。
+- **iOS / iPadOS 当前无法运行游戏**：所有浏览器都使用 WebKit，而 WebKit 尚不支持
+  引擎依赖的 WebAssembly JSPI。安装 iOS 版 Chrome / Edge / Firefox 也无法绕过。
+- 其他缺少元素全屏 API 的兼容浏览器会降级为伪全屏（铺满视口 +
+  `viewport-fit=cover`），地址栏可能无法隐藏。
 - **登录限速用 KV**，最终一致，并发下计数可能少算几次。对暴力破解这个量级够用，
   不值得为此上 Durable Object。
 - **`/admin` 离线不可用**，刻意为之：展示一个连不上 API 的登录框没有意义。

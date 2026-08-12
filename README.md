@@ -10,7 +10,12 @@ A WebAssembly port of the **KiriKiri2 engine** (T Visual Presenter), allowing Ki
 
 ## Supported Browsers
 
-Chrome, Edge, Firefox, Safari (any browser with WebAssembly + SharedArrayBuffer support).
+Chrome / Edge 137 or later on Windows, macOS, Linux, and Android. The engine requires
+WebAssembly JSPI, SharedArrayBuffer, and WebGL.
+
+iOS and iPadOS are currently unsupported. All browsers on those systems use WebKit,
+which does not implement the JSPI capability required by the engine; installing Chrome,
+Edge, or Firefox for iOS does not work around this platform limitation.
 
 ---
 
@@ -131,12 +136,6 @@ You can also pass game sources via URL query parameters directly:
 ```bash
 openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes
 ```
-
----
-
-## TODO
-
-- [ ] Switch from Asyncify + `NO_DISABLE_EXCEPTION_CATCHING` to JSPI + `-fwasm-exceptions` once iOS Safari supports [JSPI (JavaScript Promise Integration)](https://github.com/aspect-build/aspect-cli/issues/1). This will eliminate `invoke_*`-based exception handling, significantly reduce wasm binary size (~26MB → ~17MB), and lower per-Worker memory overhead.
 
 ---
 

@@ -36,6 +36,7 @@ const returnTo = location.pathname + location.search;
 const singleGame = computed(() => props.games.length === 1 ? props.games[0] : null);
 const needsLogin = computed(() => !!backend.value?.requiresAccount && !props.account);
 const canSync = computed(() => !!backend.value && !needsLogin.value);
+const remoteName = computed(() => backend.value?.kind === 'webdav' ? 'WebDAV' : '站点云端');
 
 const relevantRows = computed(() => rows.value.filter((row) => row.local || row.remote));
 
@@ -55,7 +56,7 @@ function fmtTime(value) {
 
 function stateFor(row) {
     if (conflicts.value.has(row.game.id)) return { key: 'conflict', label: '存在冲突' };
-    if (!row.local && row.remote) return { key: 'cloud', label: '仅云端' };
+    if (!row.local && row.remote) return { key: 'cloud', label: `仅${remoteName.value}` };
     if (row.local && !row.remote) return { key: 'dirty', label: '待首次同步' };
     if (!row.local && !row.remote) return { key: 'empty', label: '无存档' };
     const action = classifySync(
@@ -65,7 +66,7 @@ function stateFor(row) {
     );
     if (action === 'conflict') return { key: 'conflict', label: '存在冲突' };
     if (action === 'upload') return { key: 'dirty', label: '本机待同步' };
-    if (action === 'download') return { key: 'cloud', label: '云端有更新' };
+    if (action === 'download') return { key: 'cloud', label: `${remoteName.value}有更新` };
     return { key: 'synced', label: '已同步' };
 }
 
@@ -100,7 +101,7 @@ async function runAll() {
     if (!canSync.value || running.value) return;
     running.value = true;
     status.value = '';
-    progress.value = '正在检查本机与云端版本…';
+    progress.value = '正在检查本机与远端版本…';
     conflicts.value = new Map();
     try {
         const result = await syncAllGames(props.games, ({ index, total, game }) => {
@@ -142,7 +143,7 @@ async function runOne(row) {
             status.value = '检测到两个不同进度，请选择保留方式';
         } else {
             status.value = result.result === 'uploaded' ? '已上传本机版本'
-                : result.result === 'downloaded' ? '已下载云端版本' : '存档已经是最新版本';
+                : result.result === 'downloaded' ? '已下载远端版本' : '存档已经是最新版本';
         }
         await refresh();
     } catch (err) {
@@ -162,8 +163,8 @@ async function resolve(row, choice) {
     if (!conflictState.remote || running.value) return;
     if (choice !== 'both') {
         const message = choice === 'local'
-            ? '确定使用本机版本？当前云端版本会保留在历史中。'
-            : '确定使用云端版本？本机未同步的进度会被替换；需要保留时请先选择“下载两份”。';
+            ? '确定使用本机版本？当前远端版本会保留在历史中。'
+            : '确定使用远端版本？本机未同步的进度会被替换；需要保留时请先选择“下载两份”。';
         if (!confirm(message)) return;
     }
     running.value = true;
@@ -178,7 +179,7 @@ async function resolve(row, choice) {
             status.value = `《${row.game.title}》冲突已处理`;
             await refresh();
         } else {
-            status.value = '本机与云端 ZIP 均已下载，冲突仍保留等待选择';
+            status.value = '本机与远端 ZIP 均已下载，冲突仍保留等待选择';
         }
     } catch (err) {
         status.value = err.message || '处理冲突失败';
@@ -224,7 +225,7 @@ onMounted(async () => {
             <section class="sync-panel" role="dialog" aria-modal="true" aria-labelledby="sync-title">
                 <header class="sync-head">
                     <div>
-                        <h2 id="sync-title">{{ singleGame ? `${singleGame.title} · 云存档` : '云存档' }}</h2>
+                        <h2 id="sync-title">{{ singleGame ? `${singleGame.title} · 存档同步` : '存档同步' }}</h2>
                         <p>仅在你点击同步时传输存档，不会在游玩过程中自动上传。</p>
                     </div>
                     <button class="btn btn-ghost btn-sm" @click="emit('close')">关闭</button>
@@ -232,10 +233,11 @@ onMounted(async () => {
 
                 <div v-if="needsLogin" class="sync-login">
                     <strong>登录后才能同步</strong>
-                    <p>本地存档不会受影响。可使用任一账号登录，也可以之后再绑定另一个。</p>
+                    <p>当前选择的是站点云存档。可使用任一账号登录；WebDAV 无需本站账号，可在设置中切换。</p>
                     <div class="sync-login-actions">
                         <a class="btn btn-primary" :href="accountLoginUrl('steam', { returnTo })">使用 Steam 登录</a>
                         <a class="btn" :href="accountLoginUrl('github', { returnTo })">使用 GitHub 登录</a>
+                        <a class="btn btn-ghost" href="/settings">改用 WebDAV</a>
                     </div>
                 </div>
 
@@ -250,7 +252,7 @@ onMounted(async () => {
                         <div>
                             <strong>{{ backend.label }}</strong>
                             <span v-if="backend.kind === 'site' && account">{{ account.displayName }}</span>
-                            <span v-if="cloudUsage">云端 {{ fmtBytes(cloudUsage.bytes) }} / {{ fmtBytes(cloudUsage.limit) }}</span>
+                            <span v-if="cloudUsage">站点云端 {{ fmtBytes(cloudUsage.bytes) }} / {{ fmtBytes(cloudUsage.limit) }}</span>
                             <span v-else-if="backend.kind === 'webdav'">存档直接传输到你的 WebDAV</span>
                         </div>
                         <button class="btn btn-primary" :disabled="running" @click="runAll">
@@ -260,20 +262,20 @@ onMounted(async () => {
                     </div>
 
                     <div v-if="loading" class="sync-loading"><span class="spinner" /></div>
-                    <p v-else-if="relevantRows.length === 0" class="sync-empty">本机和云端都还没有存档。</p>
+                    <p v-else-if="relevantRows.length === 0" class="sync-empty">本机和远端都还没有存档。</p>
                     <ul v-else class="sync-list">
                         <li v-for="row in relevantRows" :key="row.game.id" class="sync-row">
                             <div class="sync-info">
                                 <strong>{{ row.game.title }}</strong>
                                 <span>
                                     {{ row.local ? `${row.local.count} 个本地文件 · ${fmtBytes(row.local.size)}` : '本机无存档' }}
-                                    <template v-if="row.remote"> · 云端 {{ fmtTime(row.remote.createdAt) }}</template>
+                                    <template v-if="row.remote"> · {{ remoteName }} {{ fmtTime(row.remote.createdAt) }}</template>
                                 </span>
                             </div>
                             <span class="sync-state" :class="stateFor(row).key">{{ stateFor(row).label }}</span>
                             <div class="sync-actions">
                                 <template v-if="stateFor(row).key === 'conflict'">
-                                    <button class="btn btn-sm" :disabled="running" @click="resolve(row, 'cloud')">使用云端</button>
+                                    <button class="btn btn-sm" :disabled="running" @click="resolve(row, 'cloud')">使用远端</button>
                                     <button class="btn btn-sm" :disabled="running" @click="resolve(row, 'local')">使用本机</button>
                                     <button class="btn btn-ghost btn-sm" :disabled="running" @click="resolve(row, 'both')">下载两份</button>
                                 </template>
@@ -291,7 +293,7 @@ onMounted(async () => {
                 <div v-if="historyGame" class="history-layer" @click.self="historyGame = null">
                     <section class="history-panel">
                         <header>
-                            <div><h3>{{ historyGame.title }}</h3><p>最近 {{ history.length }} 个云端版本</p></div>
+                            <div><h3>{{ historyGame.title }}</h3><p>最近 {{ history.length }} 个远端版本</p></div>
                             <button class="btn btn-ghost btn-sm" @click="historyGame = null">返回</button>
                         </header>
                         <div v-if="historyLoading" class="sync-loading"><span class="spinner" /></div>

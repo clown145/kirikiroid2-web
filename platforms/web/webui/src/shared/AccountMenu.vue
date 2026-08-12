@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import {
-    Database, FolderOpen, Link as LinkIcon, LogOut, Menu, Settings, Shield, Trash2
+    CircleHelp, Database, FolderOpen, Link as LinkIcon, LogOut, Menu, Settings, Shield, Trash2
 } from '@lucide/vue';
 import { api, accountLoginUrl } from './api.js';
 
@@ -202,7 +202,7 @@ onUnmounted(() => {
             </div>
             <div v-else class="account-guest">
                 <strong>登录 / 注册</strong>
-                <small>登录后可在不同设备间同步云存档，本地游玩无需登录。</small>
+                <small>登录可使用站点云存档；本地游玩和 WebDAV 无需登录。</small>
                 <div class="provider-list">
                     <button class="provider-button" type="button" :disabled="!available.steam"
                         @click="beginAuth('steam')">
@@ -224,7 +224,10 @@ onUnmounted(() => {
 
             <nav class="account-tools" aria-label="工具">
                 <a class="account-menu-item" href="/settings">
-                    <Settings :size="16" /><span>设置与云存档</span>
+                    <Settings :size="16" /><span>设置与存档同步</span>
+                </a>
+                <a class="account-menu-item" href="/help">
+                    <CircleHelp :size="16" /><span>帮助与说明</span>
                 </a>
                 <button v-if="cacheTools" class="account-menu-item" type="button" @click="openCache">
                     <Database :size="16" /><span>本地缓存</span>
@@ -271,7 +274,7 @@ onUnmounted(() => {
                 <h2 id="logout-title">退出账号</h2>
                 <p id="logout-description">要同时清空这台设备上的本地存档吗？</p>
                 <p class="logout-warning">
-                    清空后，尚未同步的进度无法恢复。云端存档、游戏下载缓存和外部游戏文件夹不会被删除。
+                    清空后，尚未同步的进度无法恢复。远端存档、游戏下载缓存和外部游戏文件夹不会被删除。
                 </p>
                 <p v-if="logoutError" class="account-status">{{ logoutError }}</p>
                 <div class="logout-actions">

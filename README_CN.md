@@ -10,7 +10,11 @@
 
 ## 支持浏览器
 
-Chrome、Edge、Firefox、Safari（任何支持 WebAssembly + SharedArrayBuffer 的现代浏览器）。
+Windows、macOS、Linux 和 Android 上的 Chrome / Edge 137 及以上版本。引擎依赖
+WebAssembly JSPI、SharedArrayBuffer 和 WebGL。
+
+iOS 和 iPadOS 当前不受支持。这些系统上的所有浏览器都使用 WebKit，而 WebKit
+尚未实现引擎所需的 JSPI；安装 iOS 版 Chrome、Edge 或 Firefox 也无法绕过这一平台限制。
 
 ---
 
@@ -128,12 +132,6 @@ python3 coi-server.py platforms/web/webui/dist --zip /path/to/game.zip --entry d
 ```bash
 openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes
 ```
-
----
-
-## TODO
-
-- [ ] 等 iOS Safari 支持 [JSPI（JavaScript Promise Integration）](https://github.com/aspect-build/aspect-cli/issues/1)后，使用 JSPI + `-fwasm-exceptions` 替代 Asyncify + `NO_DISABLE_EXCEPTION_CATCHING`。这将消除基于 `invoke_*` 的异常处理，显著减小 wasm 体积（~26MB → ~17MB），降低每个 Worker 的内存开销。
 
 ---
 

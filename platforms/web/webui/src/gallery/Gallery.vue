@@ -17,6 +17,8 @@ const showSync = ref(false);
 const syncImmediately = ref(false);
 const dirtySaveCount = ref(0);
 const preparingDownload = ref(null);
+const showIntro = ref(false);
+const INTRO_DISMISSED_KEY = 'krkr2-intro-dismissed';
 
 const allTags = computed(() => {
     const counts = new Map();
@@ -268,7 +270,14 @@ async function closeSync() {
     } catch {}
 }
 
+function dismissIntro() {
+    showIntro.value = false;
+    try { localStorage.setItem(INTRO_DISMISSED_KEY, '1'); } catch {}
+}
+
 onMounted(async () => {
+    try { showIntro.value = localStorage.getItem(INTRO_DISMISSED_KEY) !== '1'; }
+    catch { showIntro.value = true; }
     try {
         games.value = await api.listGames();
     } catch (err) {
@@ -311,6 +320,18 @@ onUnmounted(() => {
     </header>
 
     <main class="body">
+        <aside v-if="showIntro" class="intro-notice">
+            <p>
+                游戏和存档都在本机运行。需要跨设备使用时，可登录使用站点云存档，
+                或在设置中连接自己的 WebDAV。
+            </p>
+            <a href="/help">了解更多</a>
+            <button type="button" aria-label="关闭提示" title="关闭" @click="dismissIntro">
+                <svg viewBox="0 0 24 24" fill="currentColor" width="15" height="15" aria-hidden="true">
+                    <path d="M18.3 5.71 12 12l6.3 6.29-1.41 1.42L10.59 13.41 4.3 19.71 2.89 18.3 9.17 12 2.89 5.71 4.3 4.29l6.29 6.3 6.3-6.3z" />
+                </svg>
+            </button>
+        </aside>
         <button v-if="dirtySaveCount" class="save-reminder" @click="openSync(false)">
             <span>{{ dirtySaveCount }} 个游戏有本地存档待同步</span>
             <strong>查看</strong>
@@ -509,6 +530,25 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.intro-notice {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 18px;
+    padding: 10px 11px 10px 13px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bg-1);
+    color: var(--fg-1);
+    font-size: 11px;
+    line-height: 1.55;
+}
+.intro-notice p { flex: 1; margin: 0; }
+.intro-notice a { flex: none; color: var(--fg-0); font-weight: 550; }
+.intro-notice a:hover { text-decoration: underline; }
+.intro-notice button { width: 28px; height: 28px; flex: none; display: grid; place-items: center; border-radius: 6px; color: var(--fg-2); }
+.intro-notice button:hover { background: var(--bg-2); color: var(--fg-0); }
 .save-reminder {
     width: 100%;
     min-height: 42px;
@@ -688,6 +728,8 @@ onUnmounted(() => {
     .nav-sync-wide { display: none; }
     .nav-sync-short { display: inline; }
     .body { padding: var(--space-5) var(--space-4) var(--space-6); }
+    .intro-notice { align-items: flex-start; gap: 10px; }
+    .intro-notice a { align-self: center; }
     .search { min-width: 0; width: 100%; }
     .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: var(--space-3); }
     .h1 { font-size: 22px; }

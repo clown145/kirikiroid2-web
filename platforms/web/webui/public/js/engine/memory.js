@@ -1,11 +1,13 @@
-// 共享 wasm 内存预创建（iOS Safari 兼容）。
+// 共享 wasm 内存预创建（为不同内存分配策略降档）。
 //
 // glue 的 initMemory 默认 new WebAssembly.Memory({maximum: 2GB, shared:true})。
 // V8 对 maximum 只做惰性虚拟地址预留，而 JSC（尤其 iOS）按 maximum 实预留，
 // iPhone 的 WebContent 进程拿不到 2GB，直接 RangeError: Out of memory，
 // 引擎死在启动前。glue 优先采用 Module.wasmMemory（initMemory 第一分支），
 // 这里逐级降档预创建：桌面第一档 2048MB 即成功（行为与原来完全一致），
-// iOS 自动落到能分配的档位。提供的 maximum ≤ 模块声明的 2GB 可通过导入校验。
+// 其他实现可自动落到能分配的档位。提供的 maximum ≤ 模块声明的 2GB 可通过
+// 导入校验。注意：iOS/iPadOS 当前缺少 JSPI，仍会被 boot-guards 阻止运行；
+// 内存能否分配不代表引擎兼容。
 
 (function () {
     var preallocWasmMemory = null;

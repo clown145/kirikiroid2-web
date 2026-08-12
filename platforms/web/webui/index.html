@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <meta name="description" content="在浏览器里直接玩 Kirikiri2（吉里吉里2）引擎的视觉小说，无需安装。支持存档、全屏，手机和电脑都能跑。">
+    <meta name="description" content="在支持 WebAssembly JSPI 的浏览器里直接玩 Kirikiri2（吉里吉里2）引擎的视觉小说，无需安装。支持本地存档与手动同步。">
     <meta name="keywords" content="视觉小说, galgame, 吉里吉里, Kirikiri2, xp3, 浏览器, 在线">
     <meta property="og:title" content="游戏库">
     <meta property="og:description" content="在浏览器里直接玩视觉小说，无需安装。">
@@ -43,28 +43,14 @@
         <details>
             <summary>关于本站</summary>
             <div class="about">
-                <p>在浏览器里直接运行 Kirikiroid2（吉里吉里2）引擎的视觉小说，不需要安装任何东西。游戏完全在你的设备上运行；存档只有在你登录并手动同步时才会上传。</p>
-
-                <h3>用法</h3>
-                <ul>
-                    <li>从游戏库点开任意一作，直接开始</li>
-                    <li>也可以「打开本地文件」，读取自己的 <code>.xp3</code> 档案、<code>.zip</code> 整包或游戏文件夹</li>
-                    <li>存档按游戏自动分开保存，可导出 <code>.zip</code> 备份或换设备时导入</li>
-                </ul>
-
-                <h3>游戏中</h3>
-                <ul>
-                    <li>画面上没有任何常驻元素。电脑上把鼠标移到屏幕最顶端唤出控制栏</li>
-                    <li>手机上从顶边下滑唤出控制栏；开局那几秒顶部中间会有个小箭头，淡出后原位置仍然可以点</li>
-                    <li>控制栏里可以退出游戏、管理存档、切换全屏；<kbd>F</kbd> 键也能切全屏</li>
-                </ul>
-
-                <h3>浏览器要求</h3>
-                <p>需要支持 WebAssembly 与 WebGL 的现代浏览器。推荐用最新版 Chrome / Edge；Safari 需要 27（iOS 27）及以上。手机和平板都能跑。</p>
+                <p>在浏览器里直接运行 Kirikiroid2（吉里吉里2）游戏，不需要安装客户端。游戏完全在你的设备上运行；存档只在你手动同步时传输，可选择站点云端或自己的 WebDAV。</p>
+                <p><a href="/help">查看完整的使用、存档同步与 WebDAV 配置说明</a></p>
             </div>
         </details>
 
         <p class="footer-links">
+            <a href="/help">帮助与说明</a>
+            <span aria-hidden="true">·</span>
             <a href="#" id="force-update-btn" title="清除缓存的应用文件并加载最新版本（存档保留）">强制更新</a>
             <span aria-hidden="true">·</span>
             <span id="build-version"></span>

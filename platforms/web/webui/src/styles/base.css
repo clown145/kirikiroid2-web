@@ -122,8 +122,8 @@ textarea.input { resize: vertical; min-height: 76px; line-height: 1.6; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* 伪全屏：iOS Safari 不支持元素全屏，只能锁住滚动并铺满视口。
-   浏览器地址栏无法隐藏，这是平台限制，不是实现缺陷。 */
+/* 伪全屏：缺少元素全屏 API 时锁住滚动并铺满视口。
+   浏览器地址栏可能无法隐藏，这是平台限制，不是实现缺陷。 */
 body.faux-fullscreen {
     overflow: hidden;
     position: fixed;

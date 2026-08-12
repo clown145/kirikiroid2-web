@@ -74,8 +74,9 @@ export default {
                 return withSecurityHeaders(asset);
             }
 
-            // --- 设置页：复用画廊轻量入口，不加载引擎 --------------------
-            if (pathname === '/settings' && isDocumentRequest(request)) {
+            // --- 设置与帮助页：复用画廊轻量入口，不加载引擎 --------------
+            if ((pathname === '/settings' || pathname === '/help') &&
+                isDocumentRequest(request)) {
                 const asset = await serveAsset(env, request, url, '/index.html');
                 return withSecurityHeaders(asset);
             }

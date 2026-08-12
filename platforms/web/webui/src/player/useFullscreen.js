@@ -7,7 +7,7 @@
 
 import { ref, onMounted, onUnmounted } from 'vue';
 
-/** iOS Safari 不支持元素全屏（只有 <video> 有专有 API），只能走伪全屏。 */
+/** 缺少元素全屏 API 时使用伪全屏；iOS 当前因缺少 JSPI，无法进入游戏。 */
 function detectElementFullscreenSupport() {
     if (typeof document === 'undefined') return false;
     return !!(
@@ -18,7 +18,7 @@ function detectElementFullscreenSupport() {
 
 export function useFullscreen(targetRef) {
     const isFullscreen = ref(false);
-    // 伪全屏：iOS 等不支持元素全屏时，用 position:fixed 铺满视口
+    // 伪全屏：浏览器不支持元素全屏时，用 position:fixed 铺满视口
     const isFaux = ref(false);
     const supported = detectElementFullscreenSupport();
 

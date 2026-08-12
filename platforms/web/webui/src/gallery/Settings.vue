@@ -34,6 +34,8 @@ const webDav = ref({
 
 const dirtyCount = computed(() => localRows.value.filter((row) => row.dirty).length);
 const lastSyncedAt = computed(() => Math.max(0, ...localRows.value.map((row) => Number(row.lastSyncedAt || 0))));
+const storageUsageLabel = computed(() => settings.value.saveSyncProvider === 'webdav'
+    ? '存储空间' : '站点云端用量');
 
 function updateSetting(key, event) {
     settings.value = setSetting(key, event.target.checked);
@@ -168,10 +170,10 @@ onMounted(() => {
         <section class="settings-section" aria-labelledby="save-settings">
             <div class="section-title section-title-action">
                 <div>
-                    <h2 id="save-settings">云存档</h2>
+                    <h2 id="save-settings">存档同步</h2>
                     <p>同步固定为手动模式，游戏运行时不会上传。</p>
                 </div>
-                <button class="btn btn-primary" :disabled="loading" @click="showSync = true">管理云存档</button>
+                <button class="btn btn-primary" :disabled="loading" @click="showSync = true">管理同步</button>
             </div>
 
             <div class="setting-row provider-row">
@@ -196,6 +198,10 @@ onMounted(() => {
             </div>
 
             <div v-if="settings.saveSyncProvider === 'webdav'" class="webdav-settings">
+                <p class="webdav-privacy">
+                    浏览器会直接连接 WebDAV，地址和凭据不会发送给本站。
+                    <a href="/help#webdav">查看服务器要求</a>
+                </p>
                 <div class="webdav-grid">
                     <label class="field">
                         <span>配置名称</span>
@@ -249,7 +255,7 @@ onMounted(() => {
             <div class="setting-row device-row">
                 <span>
                     <strong>设备名称</strong>
-                    <small>显示在云端版本历史中，帮助区分存档来源。</small>
+                    <small>显示在远端版本历史中，帮助区分存档来源。</small>
                 </span>
                 <div class="device-input">
                     <input v-model="deviceName" class="input" maxlength="80" @keyup.enter="saveDeviceName">
@@ -261,8 +267,9 @@ onMounted(() => {
                 <div><dt>同步位置</dt><dd>{{ getSyncProviderStatus().label }}</dd></div>
                 <div><dt>待同步游戏</dt><dd>{{ dirtyCount }}</dd></div>
                 <div><dt>上次同步</dt><dd>{{ fmtTime(lastSyncedAt) }}</dd></div>
-                <div><dt>云端用量</dt><dd>{{ cloud?.usage ? `${fmtBytes(cloud.usage.bytes)} / ${fmtBytes(cloud.usage.limit)}` : '由存储服务管理' }}</dd></div>
+                <div><dt>{{ storageUsageLabel }}</dt><dd>{{ cloud?.usage ? `${fmtBytes(cloud.usage.bytes)} / ${fmtBytes(cloud.usage.limit)}` : '由存储服务管理' }}</dd></div>
             </dl>
+            <p class="sync-help"><a href="/help#sync">了解手动同步、冲突处理与数据存储方式</a></p>
         </section>
 
         <p v-if="status" class="settings-status" aria-live="polite">{{ status }}</p>
@@ -296,6 +303,9 @@ onMounted(() => {
 .segmented button { min-height: 32px; padding: 5px 12px; border-radius: 5px; color: var(--fg-2); font-size: 12px; white-space: nowrap; }
 .segmented button.active { background: var(--fg-0); color: var(--bg-0); }
 .webdav-settings { padding: 18px 0; border-top: 1px solid var(--line); }
+.webdav-privacy { margin: 0 0 16px; color: var(--fg-2); font-size: 11px; line-height: 1.6; }
+.webdav-privacy a, .sync-help a { color: var(--fg-1); text-decoration: underline; }
+.webdav-privacy a:hover, .sync-help a:hover { color: var(--fg-0); }
 .webdav-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .webdav-grid .field > span { color: var(--fg-1); font-size: 11px; font-weight: 500; }
 .webdav-url { grid-column: 1 / -1; }
@@ -309,6 +319,7 @@ onMounted(() => {
 .save-stats div { min-width: 0; padding-right: 16px; }
 .save-stats dt { margin-bottom: 5px; color: var(--fg-2); font-size: 10px; }
 .save-stats dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.sync-help { margin: 0; padding: 0 0 16px; font-size: 11px; }
 .settings-status { margin: 18px 0 0; color: var(--fg-1); font-size: 12px; }
 @media (max-width: 680px) {
     .settings-nav { padding: var(--space-3) var(--space-4); }

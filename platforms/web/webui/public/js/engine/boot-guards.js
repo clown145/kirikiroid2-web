@@ -78,17 +78,20 @@
     if (guards.jspiUnsupported) {
         (function () {
             var ua = navigator.userAgent;
-            // iOS 上所有浏览器（含 Chrome 的 CriOS / Firefox 的 FxiOS）都被
-            // 强制使用 WebKit 内核，一律按 Safari 处理；iPadOS 13+ 默认伪装
-            // 桌面 Mac UA，用触点数辨别
+            // iOS 上所有浏览器（含 Chrome 的 CriOS / Firefox 的 FxiOS）都使用
+            // WebKit，而当前 iOS WebKit 完全不支持 JSPI。iPadOS 13+ 默认伪装
+            // 桌面 Mac UA，用触点数辨别。此处不能提示用户换 iOS 浏览器或升级到
+            // 某个 Safari 版本：它们都无法补上这项平台能力。
             var isIOS = /iPhone|iPad|iPod/.test(ua) ||
                 (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
             var isFirefox = /Firefox\//.test(ua);
             var isChromium = /Chrome\/|Chromium\/|Edg\/|OPR\//.test(ua);
             var isSafari = /Safari\//.test(ua) && !isChromium && !isFirefox;
             var advice;
-            if (isIOS || isSafari) {
-                advice = '请升级到 Safari 27（iOS 27）或以上版本。\nPlease upgrade to Safari 27 (iOS 27) or later.';
+            if (isIOS) {
+                advice = 'iOS 和 iPadOS 上的所有浏览器目前都不支持 JSPI，因此暂时无法运行游戏；改用 iOS 版 Chrome、Edge 或 Firefox 也无法解决。请在支持 JSPI 的电脑或 Android 设备上使用最新版 Chrome / Edge。\nAll browsers on iOS and iPadOS currently lack JSPI, so the game cannot run on these devices. Chrome, Edge, or Firefox for iOS cannot work around this limitation. Please use the latest Chrome / Edge on a supported desktop or Android device.';
+            } else if (isSafari) {
+                advice = '当前 Safari 缺少所需的 JSPI 能力，请改用最新版 Chrome / Edge。\nThis Safari version lacks the required JSPI support. Please use the latest Chrome / Edge instead.';
             } else if (isFirefox) {
                 advice = '请改用最新版 Chrome 浏览器。\nPlease use the latest version of Google Chrome instead.';
             } else if (isChromium) {
