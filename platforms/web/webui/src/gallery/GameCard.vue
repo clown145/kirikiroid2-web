@@ -6,6 +6,8 @@ const props = defineProps({
     game: { type: Object, required: true },
     // 该游戏的持久缓存 {bytes, size, complete}；未缓存过为 null
     cacheInfo: { type: Object, default: null },
+    // 已收到点击，正在探测远端与初始化缓存；此时下载器还没有正式 state。
+    preparing: { type: Boolean, default: false },
     // 当前正在下载的就是它时的状态 {pct, running, paused}
     downloading: { type: Object, default: null }
 });
@@ -26,6 +28,7 @@ const partialPct = computed(() => {
 });
 
 const downloadTitle = computed(() => {
+    if (props.preparing) return '正在准备下载，请稍候';
     if (cached.value) return '已完整下载到本地，游玩时不再消耗流量';
     if (props.downloading?.retrying) return '网络暂时中断，正在自动续传；点击停止';
     if (props.downloading?.finalizing) return '资源已接收完成，正在写入本地缓存';
@@ -62,12 +65,14 @@ function fmt(bytes) {
             <button
                 v-if="game.downloadUrl"
                 class="dl-btn"
-                :class="{ cached, active: !!downloading }"
+                :class="{ cached, active: !!downloading || preparing }"
                 type="button"
+                :disabled="preparing"
                 :title="downloadTitle"
                 :aria-label="downloadTitle"
                 @click.prevent.stop="emit('download')">
-                <svg v-if="cached" viewBox="0 0 24 24" fill="currentColor" width="15" height="15" aria-hidden="true">
+                <span v-if="preparing" class="dl-spinner" aria-hidden="true" />
+                <svg v-else-if="cached" viewBox="0 0 24 24" fill="currentColor" width="15" height="15" aria-hidden="true">
                     <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
                 </svg>
                 <svg v-else-if="downloading" viewBox="0 0 24 24" fill="currentColor" width="15" height="15" aria-hidden="true">
@@ -91,7 +96,8 @@ function fmt(bytes) {
                 <div v-if="game.tags.length" class="tags">
                     <span v-for="tag in game.tags.slice(0, 3)" :key="tag" class="tag">{{ tag }}</span>
                 </div>
-                <span v-if="cached" class="cache-note" :title="`已缓存 ${fmt(cacheInfo.bytes)}`">已下载</span>
+                <span v-if="preparing" class="cache-note on">准备中</span>
+                <span v-else-if="cached" class="cache-note" :title="`已缓存 ${fmt(cacheInfo.bytes)}`">已下载</span>
                 <span v-else-if="downloading" class="cache-note on">
                     {{ downloading.retrying
                         ? '续传中'
@@ -242,6 +248,16 @@ function fmt(bytes) {
 }
 
 .dl-btn:hover { opacity: 1; background: rgba(0, 0, 0, 0.85); }
+.dl-btn:disabled { opacity: 1; cursor: wait; }
+.dl-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(255, 255, 255, .35);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 700ms linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 .dl-btn.cached { color: #6ee7a8; }
 .dl-btn.active { background: rgba(37, 99, 235, 0.9); opacity: 1; }
 

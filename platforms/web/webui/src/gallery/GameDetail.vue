@@ -18,6 +18,7 @@ const storage = ref(null);
 const dismissedFolderPrompt = ref(false);
 const account = ref(null);
 const showSync = ref(false);
+const preparingDownload = ref(false);
 let pollTimer = null;
 
 const cover = computed(() => (coverFailed.value ? null : coverSrc(game.value)));
@@ -31,6 +32,7 @@ const partialPct = computed(() => {
 const downloadPct = computed(() =>
     downloading.value?.pct ?? (cached.value ? 100 : partialPct.value));
 const downloadLabel = computed(() => {
+    if (preparingDownload.value) return '准备中';
     if (cached.value) return '已下载';
     if (downloading.value?.retrying) return '续传中';
     if (downloading.value?.finalizing) return '写入中';
@@ -67,6 +69,7 @@ function pollDownload() {
 
 async function beginDownload() {
     if (!game.value?.downloadUrl || !window.KrKr2Cache) return;
+    preparingDownload.value = true;
     try {
         await window.KrKr2Cache.download({
             gameKey: game.value.id,
@@ -84,11 +87,14 @@ async function beginDownload() {
         pollDownload();
     } catch (err) {
         alert('无法开始下载：' + (err?.message || err));
+    } finally {
+        preparingDownload.value = false;
     }
 }
 
 async function onDownload() {
     if (!window.KrKr2Cache || !game.value?.downloadUrl) return;
+    if (preparingDownload.value) return;
     const current = window.KrKr2Cache.downloadState();
     if (current?.gameKey === game.value.id) {
         await window.KrKr2Cache.stopDownload();
@@ -98,10 +104,18 @@ async function onDownload() {
     }
     if (cached.value) return;
 
-    storage.value = await window.KrKr2Cache.storageInfo();
+    preparingDownload.value = true;
+    try {
+        storage.value = await window.KrKr2Cache.storageInfo();
+    } catch (err) {
+        preparingDownload.value = false;
+        alert('无法读取下载位置：' + (err?.message || err));
+        return;
+    }
     if (storage.value?.supported && storage.value.kind !== 'folder' &&
         !dismissedFolderPrompt.value) {
         pendingDownload.value = true;
+        preparingDownload.value = false;
         return;
     }
     await beginDownload();
@@ -225,8 +239,10 @@ onUnmounted(() => {
                         class="btn detail-download"
                         :class="{ active: !!downloading, cached }"
                         type="button"
+                        :disabled="preparingDownload"
                         @click="onDownload">
-                        <svg v-if="cached" viewBox="0 0 24 24" fill="currentColor" width="16" height="16" aria-hidden="true">
+                        <span v-if="preparingDownload" class="spinner detail-download-spinner" aria-hidden="true" />
+                        <svg v-else-if="cached" viewBox="0 0 24 24" fill="currentColor" width="16" height="16" aria-hidden="true">
                             <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
                         </svg>
                         <svg v-else-if="downloading" viewBox="0 0 24 24" fill="currentColor" width="16" height="16" aria-hidden="true">
@@ -243,14 +259,17 @@ onUnmounted(() => {
                     </button>
                 </div>
 
-                <div v-if="cacheInfo || downloading" class="detail-cache">
+                <div v-if="preparingDownload || cacheInfo || downloading" class="detail-cache">
                     <div class="detail-cache-line">
-                        <span v-if="downloading">正在下载{{ downloading.retrying ? '，网络中断后续传' : '' }}</span>
+                        <span v-if="preparingDownload">正在检查资源与本地空间，请稍候</span>
+                        <span v-else-if="downloading">正在下载{{ downloading.retrying ? '，网络中断后续传' : '' }}</span>
                         <span v-else-if="cached">已完整下载到本地 · {{ fmt(cacheInfo.bytes) }}</span>
                         <span v-else>已下载 {{ fmt(cacheInfo.bytes) }} · {{ partialPct }}%</span>
                         <strong v-if="downloading">{{ downloadPct }}%</strong>
                     </div>
-                    <div class="detail-progress"><span :style="{ width: downloadPct + '%' }" /></div>
+                    <div v-if="!preparingDownload" class="detail-progress">
+                        <span :style="{ width: downloadPct + '%' }" />
+                    </div>
                 </div>
             </div>
         </article>
@@ -389,6 +408,7 @@ onUnmounted(() => {
 .detail-sync { padding: 10px 16px; }
 .detail-download.active { border-color: var(--line-strong); }
 .detail-download.cached { color: #6ee7a8; }
+.detail-download-spinner { width: 16px; height: 16px; }
 
 .detail-cache {
     max-width: 520px;

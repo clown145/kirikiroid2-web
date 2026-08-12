@@ -16,6 +16,7 @@ const account = ref(null);
 const showSync = ref(false);
 const syncImmediately = ref(false);
 const dirtySaveCount = ref(0);
+const preparingDownload = ref(null);
 
 const allTags = computed(() => {
     const counts = new Map();
@@ -79,6 +80,7 @@ function pollDownload() {
 
 async function onDownload(game) {
     if (!window.KrKr2Cache) return;
+    if (preparingDownload.value) return;
     const cur = window.KrKr2Cache.downloadState();
     // 再点正在下的那个 = 停止（进度已落盘，下次续传）
     if (cur && cur.gameKey === game.id) {
@@ -95,16 +97,25 @@ async function onDownload(game) {
 
     // 首次完整下载先问存哪：点这个按钮本身就是"我要长期留着"的意思，
     // 而 OPFS 存不住几个 GB —— 浏览器在存储压力下会清掉它。
-    storage.value = await window.KrKr2Cache.storageInfo();
+    preparingDownload.value = { gameKey: game.id, title: game.title };
+    try {
+        storage.value = await window.KrKr2Cache.storageInfo();
+    } catch (err) {
+        preparingDownload.value = null;
+        alert('无法读取下载位置：' + (err?.message || err));
+        return;
+    }
     if (storage.value.supported && storage.value.kind !== 'folder' &&
         !dismissedFolderPrompt.value) {
         pendingDownload.value = game;
+        preparingDownload.value = null;
         return;
     }
     await beginDownload(game);
 }
 
 async function beginDownload(game) {
+    preparingDownload.value = { gameKey: game.id, title: game.title };
     try {
         // 一次只下一个：并行下两个只会都变慢，还抢光连接
         await window.KrKr2Cache.download({
@@ -124,6 +135,8 @@ async function beginDownload(game) {
         pollDownload();
     } catch (err) {
         alert('无法开始下载：' + (err?.message || err));
+    } finally {
+        preparingDownload.value = null;
     }
 }
 
@@ -363,6 +376,7 @@ onUnmounted(() => {
                 :key="game.id"
                 :game="game"
                 :cache-info="cacheMap[game.id] || null"
+                :preparing="preparingDownload?.gameKey === game.id"
                 :downloading="dlState && dlState.gameKey === game.id ? dlState : null"
                 @download="onDownload(game)"
                 @navigate="(e) => onNavigate(game, e)" />
@@ -370,8 +384,15 @@ onUnmounted(() => {
     </main>
 
     <!-- 下载中的状态条。常驻可见，玩家才知道后台在跑什么、离开会怎样。 -->
-    <div v-if="dlState && dlState.running" class="dlbar">
-        <div class="dlbar-in">
+    <div v-if="preparingDownload || (dlState && dlState.running)" class="dlbar">
+        <div v-if="preparingDownload" class="dlbar-in">
+            <span class="spinner" aria-hidden="true" />
+            <span class="dlbar-txt">
+                正在准备下载 <strong>{{ preparingDownload.title }}</strong>
+                · 正在检查资源与本地空间
+            </span>
+        </div>
+        <div v-else class="dlbar-in">
             <span class="dlbar-txt">
                 {{ dlState.retrying
                     ? '网络中断，正在自动续传'
@@ -382,7 +403,7 @@ onUnmounted(() => {
             <span class="dlbar-hint">进入当前游戏会接着下载，离开本站会暂停</span>
             <button class="btn btn-sm" @click="stopCurrentDownload">停止</button>
         </div>
-        <div class="dlbar-track"><span :style="{ width: dlState.pct + '%' }" /></div>
+        <div v-if="!preparingDownload" class="dlbar-track"><span :style="{ width: dlState.pct + '%' }" /></div>
     </div>
 
     <!-- 正在下载别的游戏时才确认；进入当前游戏会自动交接，不弹框。 -->
