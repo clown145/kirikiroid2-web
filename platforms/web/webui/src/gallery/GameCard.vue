@@ -56,14 +56,6 @@ function fmt(bytes) {
                 @error="failed = true">
             <div v-else class="cover-fallback" aria-hidden="true">{{ initial }}</div>
 
-            <div class="overlay">
-                <span class="play">
-                    <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
-                        <path d="M8 5v14l11-7z" />
-                    </svg>
-                </span>
-            </div>
-
             <span v-if="game.pinned" class="pin" title="置顶">置顶</span>
 
             <!-- 下载按钮嵌在 <a> 里，必须 stop + prevent，否则点它会跳去玩 -->
@@ -113,6 +105,7 @@ function fmt(bytes) {
 
 <style scoped>
 .card {
+    position: relative;
     display: flex;
     flex-direction: column;
     background: var(--bg-1);
@@ -121,14 +114,16 @@ function fmt(bytes) {
     overflow: hidden;
     transition: transform var(--dur) var(--ease),
                 border-color var(--dur) var(--ease),
-                background var(--dur) var(--ease);
+                background var(--dur) var(--ease),
+                box-shadow var(--dur) var(--ease);
 }
 
-/* 克制的 hover：位移 2px + 边框提亮。不用放大和彩色阴影。 */
-.card:hover {
-    transform: translateY(-2px);
+.card:focus-visible {
+    z-index: 1;
+    transform: translateY(-6px) scale(1.018);
     border-color: var(--line-strong);
     background: var(--bg-2);
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.38);
 }
 
 .cover {
@@ -143,6 +138,7 @@ function fmt(bytes) {
     height: 100%;
     object-fit: cover;
     display: block;
+    transition: transform 220ms var(--ease);
 }
 
 .cover-fallback {
@@ -156,27 +152,21 @@ function fmt(bytes) {
     background: linear-gradient(160deg, var(--bg-2), var(--bg-1));
 }
 
-.overlay {
-    position: absolute;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    background: rgba(0, 0, 0, 0.5);
-    opacity: 0;
-    transition: opacity var(--dur) var(--ease);
+@media (hover: hover) {
+    .card:hover {
+        z-index: 1;
+        transform: translateY(-6px) scale(1.018);
+        border-color: var(--line-strong);
+        background: var(--bg-2);
+        box-shadow: 0 16px 36px rgba(0, 0, 0, 0.38);
+    }
+    .card:hover .cover img { transform: scale(1.035); }
 }
 
-.card:hover .overlay { opacity: 1; }
-
-.play {
-    width: 46px;
-    height: 46px;
-    display: grid;
-    place-items: center;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.95);
-    color: #000;
-    padding-left: 3px;   /* 三角形视觉居中 */
+@media (prefers-reduced-motion: reduce) {
+    .card, .cover img { transition: none; }
+    .card:hover, .card:focus-visible { transform: none; }
+    .card:hover .cover img { transform: none; }
 }
 
 .pin {

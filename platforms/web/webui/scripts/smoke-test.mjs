@@ -109,11 +109,13 @@ async function visit(path, { wait = 1800, assert } = {}) {
 // --- 画廊页 ---
 await visit('/', {
     assert: async (page) => {
-        await page.click('.account-login-trigger');
+        await page.click('.account-trigger');
         const account = await page.evaluate(() => ({
-            dialog: document.querySelector('.account-panel')?.textContent || '',
+            menu: document.querySelector('.account-menu')?.textContent || '',
             providers: [...document.querySelectorAll('.provider-button')]
                 .map((button) => button.textContent.trim()),
+            tools: [...document.querySelectorAll('.account-menu-item')]
+                .map((item) => item.textContent.trim()),
             viewportFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth
         }));
         return {
@@ -124,10 +126,13 @@ await visit('/', {
             '封面走 /api/cover 代理': (await page.$$eval('.card img', (els) =>
                 els.length === 0 || els.every((e) => e.getAttribute('src')?.startsWith('/api/cover/'))).catch(() => false)),
             '搜索框存在': !!(await page.$('.search input')),
-            '登录弹窗同时提供 Steam 与 GitHub':
+            '卡片不再显示误导性的播放图标': !(await page.$('.card .play')),
+            '未登录菜单同时提供 Steam 与 GitHub':
                 account.providers.some((v) => v.includes('Steam')) &&
                 account.providers.some((v) => v.includes('GitHub')),
-            '登录弹窗明确本地游玩无需登录': account.dialog.includes('本地游玩无需登录'),
+            '未登录菜单明确本地游玩无需登录': account.menu.includes('本地游玩无需登录'),
+            '工具入口已收纳进菜单': ['设置与云存档', '本地缓存', '打开本地文件', '管理后台']
+                .every((label) => account.tools.includes(label)),
             '画廊没有水平溢出': account.viewportFits,
             // 引擎地址必须取自 engineBase，不能写死。启用 KRKR2_ENGINE_BASE 后
             // wasm 在 /engine/<版本>/ 下，写死 /index.wasm 会 404 —— 预热失灵
@@ -139,6 +144,22 @@ await visit('/', {
                 const wasm = links.filter((h) => h && h.endsWith('index.wasm'));
                 return wasm.length > 0 && wasm.every((h) => h === base + 'index.wasm');
             })
+        };
+    }
+});
+
+// --- 游戏详情：卡片进入这里后才提供游玩与单游戏同步 ---
+await visit(`/game/${encodeURIComponent(fixtureId)}`, {
+    assert: async (page) => {
+        await page.click('.detail-sync');
+        const panel = await page.evaluate(() => document.querySelector('.sync-panel')?.innerText || '');
+        return {
+            '详情页保留明确的开始游戏入口': !!(await page.$('.detail-play')),
+            '详情页提供单游戏同步入口': !!(await page.$('.detail-sync')),
+            '单游戏同步面板显示当前作品': panel.includes('冒烟测试用条目 · 云存档'),
+            '单游戏同步面板未显示同步全部': !panel.includes('同步全部存档'),
+            '未登录也能打开同步面板并看到登录入口':
+                panel.includes('登录后才能同步') && panel.includes('Steam') && panel.includes('GitHub')
         };
     }
 });

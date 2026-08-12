@@ -33,6 +33,7 @@ const historyGame = ref(null);
 const history = ref([]);
 const historyLoading = ref(false);
 const returnTo = location.pathname + location.search;
+const singleGame = computed(() => props.games.length === 1 ? props.games[0] : null);
 
 const relevantRows = computed(() => rows.value.filter((row) => row.local || row.remote));
 
@@ -210,7 +211,7 @@ onMounted(async () => {
             <section class="sync-panel" role="dialog" aria-modal="true" aria-labelledby="sync-title">
                 <header class="sync-head">
                     <div>
-                        <h2 id="sync-title">云存档</h2>
+                        <h2 id="sync-title">{{ singleGame ? `${singleGame.title} · 云存档` : '云存档' }}</h2>
                         <p>仅在你点击同步时传输存档，不会在游玩过程中自动上传。</p>
                     </div>
                     <button class="btn btn-ghost btn-sm" @click="emit('close')">关闭</button>
@@ -233,7 +234,7 @@ onMounted(async () => {
                         </div>
                         <button class="btn btn-primary" :disabled="running" @click="runAll">
                             <span v-if="running" class="spinner" />
-                            {{ running ? '同步中' : '同步全部存档' }}
+                            {{ running ? '同步中' : (singleGame ? '同步这个游戏' : '同步全部存档') }}
                         </button>
                     </div>
 

@@ -293,11 +293,7 @@ onUnmounted(() => {
             <button class="btn btn-primary btn-sm nav-sync" @click="openSync(true)">
                 <span class="nav-sync-wide">同步全部存档</span><span class="nav-sync-short">同步</span>
             </button>
-            <button class="btn btn-ghost btn-sm nav-cache" @click="openCachePanel">本地缓存</button>
-            <a class="btn btn-ghost btn-sm" href="/settings">设置</a>
-            <a class="btn btn-ghost btn-sm" href="/play/local">打开本地文件</a>
-            <a class="btn btn-ghost btn-sm nav-admin" href="/admin">管理</a>
-            <AccountMenu />
+            <AccountMenu cache-tools @open-cache="openCachePanel" />
         </div>
     </header>
 
@@ -668,7 +664,6 @@ onUnmounted(() => {
     .nav { padding: var(--space-3) var(--space-4); }
     .brand span { display: none; }
     .nav-right { gap: var(--space-1); }
-    .nav-cache, .nav-admin { display: none; }
     .nav-sync-wide { display: none; }
     .nav-sync-short { display: inline; }
     .body { padding: var(--space-5) var(--space-4) var(--space-6); }

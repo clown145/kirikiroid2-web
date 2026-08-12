@@ -1,7 +1,9 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { Cloud } from '@lucide/vue';
 import { api, coverSrc } from '../shared/api.js';
 import AccountMenu from '../shared/AccountMenu.vue';
+import SyncPanel from '../shared/SyncPanel.vue';
 import { requestDownloadHandoff } from '../shared/settings.js';
 
 const gameId = decodeURIComponent(location.pathname.replace(/^\/game\/?/, ''));
@@ -14,6 +16,8 @@ const downloading = ref(null);
 const pendingDownload = ref(false);
 const storage = ref(null);
 const dismissedFolderPrompt = ref(false);
+const account = ref(null);
+const showSync = ref(false);
 let pollTimer = null;
 
 const cover = computed(() => (coverFailed.value ? null : coverSrc(game.value)));
@@ -133,7 +137,12 @@ async function onPlay(event) {
 
 onMounted(async () => {
     try {
-        game.value = await api.getGame(gameId);
+        const [loadedGame, accountResult] = await Promise.all([
+            api.getGame(gameId),
+            api.getAccount().catch(() => ({ user: null }))
+        ]);
+        game.value = loadedGame;
+        account.value = accountResult.user || null;
         if (!game.value) loadError.value = '这个游戏不存在，或已被下架。';
         else document.title = `${game.value.title} · 游戏库`;
         await refreshCache();
@@ -228,6 +237,10 @@ onUnmounted(() => {
                         </svg>
                         {{ downloadLabel }}
                     </button>
+                    <button class="btn detail-sync" type="button" @click="showSync = true">
+                        <Cloud :size="16" aria-hidden="true" />
+                        同步存档
+                    </button>
                 </div>
 
                 <div v-if="cacheInfo || downloading" class="detail-cache">
@@ -256,6 +269,12 @@ onUnmounted(() => {
             </div>
         </div>
     </div>
+
+    <SyncPanel
+        v-if="showSync && game"
+        :games="[game]"
+        :account="account"
+        @close="showSync = false" />
 </template>
 
 <style scoped>
@@ -367,6 +386,7 @@ onUnmounted(() => {
 .detail-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-6); }
 .detail-play { padding: 10px 18px; font-size: 14px; }
 .detail-download { padding: 10px 16px; }
+.detail-sync { padding: 10px 16px; }
 .detail-download.active { border-color: var(--line-strong); }
 .detail-download.cached { color: #6ee7a8; }
 
@@ -442,5 +462,6 @@ onUnmounted(() => {
     .detail-actions { margin-top: var(--space-5); }
     .detail-play { flex: 1; justify-content: center; }
     .detail-download { flex: 1; justify-content: center; }
+    .detail-sync { flex: 1 0 100%; justify-content: center; }
 }
 </style>
