@@ -2,7 +2,8 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "krkr2-web",
   "main": "worker/index.js",
-  "compatibility_date": "2025-01-01",
+  "compatibility_date": "2026-08-08",
+  "compatibility_flags": ["nodejs_compat"],
 
   "assets": {
     "directory": "./dist",
@@ -45,6 +46,11 @@
     {
       "binding": "ENGINE",
       "bucket_name": "krkr2-engine"
+    },
+    {
+      // 玩家云存档私有桶。没有公开域名，所有读写都经过账号鉴权。
+      "binding": "SAVES",
+      "bucket_name": "krkr2-saves"
     }
   ]
 

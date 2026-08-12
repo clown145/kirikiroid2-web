@@ -143,6 +143,10 @@ onUnmounted(() => {
                     </span>
                 </div>
 
+                <a class="account-menu-item" role="menuitem" href="/settings">
+                    设置与云存档
+                </a>
+
                 <button
                     v-if="!linked('steam') && available.steam"
                     class="account-menu-item"
@@ -290,6 +294,7 @@ onUnmounted(() => {
 .account-summary small { color: var(--fg-2); font-size: 10px; }
 
 .account-menu-item {
+    display: block;
     width: 100%;
     min-height: 34px;
     padding: 7px 9px;

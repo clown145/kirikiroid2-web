@@ -2,6 +2,9 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { api } from '../shared/api.js';
 import AccountMenu from '../shared/AccountMenu.vue';
+import SyncPanel from '../shared/SyncPanel.vue';
+import { localSaveSummary } from '../shared/cloudSaves.js';
+import { getSetting } from '../shared/settings.js';
 import GameCard from './GameCard.vue';
 
 const games = ref([]);
@@ -9,6 +12,10 @@ const loading = ref(true);
 const loadError = ref('');
 const search = ref('');
 const activeTag = ref('');
+const account = ref(null);
+const showSync = ref(false);
+const syncImmediately = ref(false);
+const dirtySaveCount = ref(0);
 
 const allTags = computed(() => {
     const counts = new Map();
@@ -233,6 +240,21 @@ function clearFilters() {
     activeTag.value = '';
 }
 
+function openSync(start = false) {
+    syncImmediately.value = start;
+    showSync.value = true;
+}
+
+async function closeSync() {
+    showSync.value = false;
+    syncImmediately.value = false;
+    if (!getSetting('saveSyncReminder')) return;
+    try {
+        const local = await localSaveSummary(games.value);
+        dirtySaveCount.value = local.filter((row) => row.dirty).length;
+    } catch {}
+}
+
 onMounted(async () => {
     try {
         games.value = await api.listGames();
@@ -241,6 +263,14 @@ onMounted(async () => {
     } finally {
         loading.value = false;
     }
+    try {
+        const result = await api.getAccount();
+        account.value = result.user || null;
+        if (getSetting('saveSyncReminder')) {
+            const local = await localSaveSummary(games.value);
+            dirtySaveCount.value = local.filter((row) => row.dirty).length;
+        }
+    } catch {}
     await refreshCache();
     dlPoll = setInterval(pollDownload, 700);
 });
@@ -260,14 +290,22 @@ onUnmounted(() => {
         </a>
 
         <div class="nav-right">
-            <button class="btn btn-ghost btn-sm" @click="openCachePanel">本地缓存</button>
+            <button class="btn btn-primary btn-sm nav-sync" @click="openSync(true)">
+                <span class="nav-sync-wide">同步全部存档</span><span class="nav-sync-short">同步</span>
+            </button>
+            <button class="btn btn-ghost btn-sm nav-cache" @click="openCachePanel">本地缓存</button>
+            <a class="btn btn-ghost btn-sm" href="/settings">设置</a>
             <a class="btn btn-ghost btn-sm" href="/play/local">打开本地文件</a>
-            <a class="btn btn-ghost btn-sm" href="/admin">管理</a>
+            <a class="btn btn-ghost btn-sm nav-admin" href="/admin">管理</a>
             <AccountMenu />
         </div>
     </header>
 
     <main class="body">
+        <button v-if="dirtySaveCount" class="save-reminder" @click="openSync(false)">
+            <span>{{ dirtySaveCount }} 个游戏有本地存档待同步</span>
+            <strong>查看</strong>
+        </button>
         <div class="head">
             <div>
                 <h1 class="h1">游戏库</h1>
@@ -444,9 +482,34 @@ onUnmounted(() => {
             </div>
         </div>
     </div>
+
+    <SyncPanel
+        v-if="showSync"
+        :games="games"
+        :account="account"
+        :start-immediately="syncImmediately"
+        @close="closeSync" />
 </template>
 
 <style scoped>
+.save-reminder {
+    width: 100%;
+    min-height: 42px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 18px;
+    padding: 9px 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    background: var(--bg-2);
+    color: var(--fg-1);
+    font-size: 12px;
+    text-align: left;
+}
+.save-reminder:hover { background: var(--bg-3); }
+.save-reminder strong { color: var(--accent); font-size: 11px; }
 .nav {
     position: sticky;
     top: 0;
@@ -473,6 +536,7 @@ onUnmounted(() => {
 .brand svg { color: var(--fg-1); }
 
 .nav-right { display: flex; align-items: center; gap: var(--space-2); }
+.nav-sync-short { display: none; }
 
 .body {
     max-width: 1400px;
@@ -604,6 +668,9 @@ onUnmounted(() => {
     .nav { padding: var(--space-3) var(--space-4); }
     .brand span { display: none; }
     .nav-right { gap: var(--space-1); }
+    .nav-cache, .nav-admin { display: none; }
+    .nav-sync-wide { display: none; }
+    .nav-sync-short { display: inline; }
     .body { padding: var(--space-5) var(--space-4) var(--space-6); }
     .search { min-width: 0; width: 100%; }
     .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: var(--space-3); }

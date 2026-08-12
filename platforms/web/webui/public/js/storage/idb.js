@@ -1,46 +1,178 @@
 // IndexedDB 存档空间持久化。
 //
-// 每个「存档空间」是一个独立的 IndexedDB 数据库（krkr2-space-<name>），
-// 内含单一 object store 'files'，key 为引擎侧的绝对路径。
-// 被引擎层（write-through / 启动时恢复）和 UI 层（列表 / 导入导出）共用。
+// 每个存档空间是独立数据库（krkr2-space-<name>）。v2 在 files 之外增加
+// meta store：游戏写文件与 dirty 标记在同一事务提交，云同步只在用户手动触发。
 
 (function () {
-    // --- IndexedDB save space persistence ---
     var IDB_PREFIX = 'krkr2-space-';
+    var DB_VERSION = 2;
+    var SYNC_META_KEY = 'sync';
     var currentIdb = null;
+    var currentSpaceId = null;
+    var pendingWrites = new Set();
 
-    function idbOpen(spaceId) {
+    function defaultSyncMeta() {
+        return {
+            dirty: false,
+            baseRevision: null,
+            contentHash: null,
+            modifiedAt: null,
+            lastSyncedAt: null
+        };
+    }
+
+    function upgradeDatabase(db) {
+        if (!db.objectStoreNames.contains('files')) db.createObjectStore('files');
+        if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
+    }
+
+    function openDatabase(spaceId) {
         return new Promise(function (resolve, reject) {
-            var req = indexedDB.open(IDB_PREFIX + spaceId, 1);
-            req.onupgradeneeded = function (e) { e.target.result.createObjectStore('files'); };
-            req.onsuccess = function (e) { currentIdb = e.target.result; resolve(currentIdb); };
+            var req = indexedDB.open(IDB_PREFIX + spaceId, DB_VERSION);
+            req.onupgradeneeded = function (e) { upgradeDatabase(e.target.result); };
+            req.onsuccess = function (e) { resolve(e.target.result); };
             req.onerror = function () { reject(req.error); };
         });
     }
 
+    async function idbOpen(spaceId) {
+        if (currentIdb && currentSpaceId === spaceId) return currentIdb;
+        if (currentIdb) currentIdb.close();
+        currentIdb = await openDatabase(spaceId);
+        currentSpaceId = spaceId;
+        return currentIdb;
+    }
+
+    function transactionDone(tx) {
+        return new Promise(function (resolve, reject) {
+            tx.oncomplete = function () { resolve(); };
+            tx.onerror = function () { reject(tx.error || new Error('IndexedDB transaction failed')); };
+            tx.onabort = function () { reject(tx.error || new Error('IndexedDB transaction aborted')); };
+        });
+    }
+
+    function trackWrite(promise) {
+        pendingWrites.add(promise);
+        promise.catch(function (e) {
+            console.warn('[IDB] write failed:', e);
+        }).finally(function () {
+            pendingWrites.delete(promise);
+        });
+        return promise;
+    }
+
+    async function idbWhenIdle() {
+        while (pendingWrites.size) {
+            await Promise.allSettled(Array.from(pendingWrites));
+        }
+    }
+
     function idbSaveFile(path, data) {
-        if (!currentIdb) return;
+        if (!currentIdb) return Promise.resolve();
         try {
-            var tx = currentIdb.transaction('files', 'readwrite');
-            tx.objectStore('files').put(new Uint8Array(data), path);
-        } catch (e) { console.warn('[IDB] save failed:', path, e); }
+            var copy = new Uint8Array(data);
+            var tx = currentIdb.transaction(['files', 'meta'], 'readwrite');
+            tx.objectStore('files').put(copy, path);
+            var metaStore = tx.objectStore('meta');
+            var req = metaStore.get(SYNC_META_KEY);
+            req.onsuccess = function () {
+                metaStore.put(Object.assign(defaultSyncMeta(), req.result || {}, {
+                    dirty: true,
+                    modifiedAt: Date.now()
+                }), SYNC_META_KEY);
+            };
+            return trackWrite(transactionDone(tx));
+        } catch (e) {
+            console.warn('[IDB] save failed:', path, e);
+            return Promise.resolve();
+        }
+    }
+
+    function readAllFromDatabase(db) {
+        return new Promise(function (resolve, reject) {
+            var tx = db.transaction('files', 'readonly');
+            var results = [];
+            var cursorReq = tx.objectStore('files').openCursor();
+            cursorReq.onsuccess = function (e) {
+                var cursor = e.target.result;
+                if (cursor) {
+                    results.push({ path: cursor.key, data: new Uint8Array(cursor.value) });
+                    cursor.continue();
+                } else {
+                    results.sort(function (a, b) { return String(a.path).localeCompare(String(b.path)); });
+                    resolve(results);
+                }
+            };
+            cursorReq.onerror = function () { reject(cursorReq.error); };
+        });
+    }
+
+    function readMetaFromDatabase(db) {
+        return new Promise(function (resolve) {
+            var tx = db.transaction(['files', 'meta'], 'readonly');
+            var metaReq = tx.objectStore('meta').get(SYNC_META_KEY);
+            var countReq = tx.objectStore('files').count();
+            tx.oncomplete = function () {
+                var stored = metaReq.result;
+                resolve(Object.assign(defaultSyncMeta(), stored || {}, {
+                    // v1 数据没有 meta；只要已有文件，就应视为从未上传的本地变化。
+                    dirty: stored ? !!stored.dirty : (countReq.result || 0) > 0
+                }));
+            };
+            tx.onerror = function () { resolve(defaultSyncMeta()); };
+        });
+    }
+
+    async function withSpace(spaceId, callback) {
+        await idbWhenIdle();
+        if (currentIdb && currentSpaceId === spaceId) return callback(currentIdb);
+        var db = await openDatabase(spaceId);
+        try { return await callback(db); }
+        finally { db.close(); }
     }
 
     function idbLoadAll() {
         if (!currentIdb) return Promise.resolve([]);
-        return new Promise(function (resolve) {
-            var tx = currentIdb.transaction('files', 'readonly');
-            var store = tx.objectStore('files');
-            var results = [];
-            var cursorReq = store.openCursor();
-            cursorReq.onsuccess = function (e) {
-                var cursor = e.target.result;
-                if (cursor) {
-                    results.push({ path: cursor.key, data: cursor.value });
-                    cursor.continue();
-                } else { resolve(results); }
+        return idbWhenIdle().then(function () { return readAllFromDatabase(currentIdb); });
+    }
+
+    function idbSnapshot(spaceId) {
+        return withSpace(spaceId, async function (db) {
+            return {
+                files: await readAllFromDatabase(db),
+                meta: await readMetaFromDatabase(db)
             };
-            cursorReq.onerror = function () { resolve(results); };
+        });
+    }
+
+    function idbGetSyncMeta(spaceId) {
+        return withSpace(spaceId, function (db) { return readMetaFromDatabase(db); });
+    }
+
+    function idbSetSyncMeta(spaceId, patch) {
+        return withSpace(spaceId, async function (db) {
+            var current = await readMetaFromDatabase(db);
+            var tx = db.transaction('meta', 'readwrite');
+            tx.objectStore('meta').put(Object.assign(current, patch || {}), SYNC_META_KEY);
+            await transactionDone(tx);
+            return Object.assign(current, patch || {});
+        });
+    }
+
+    function idbReplaceFiles(spaceId, files, syncMeta) {
+        return withSpace(spaceId, async function (db) {
+            var tx = db.transaction(['files', 'meta'], 'readwrite');
+            var store = tx.objectStore('files');
+            store.clear();
+            for (var i = 0; i < files.length; i++) {
+                store.put(new Uint8Array(files[i].data), files[i].path);
+            }
+            tx.objectStore('meta').put(Object.assign(defaultSyncMeta(), syncMeta || {}, {
+                dirty: !!syncMeta?.dirty,
+                modifiedAt: Date.now(),
+                lastSyncedAt: syncMeta?.dirty ? null : Date.now()
+            }), SYNC_META_KEY);
+            await transactionDone(tx);
         });
     }
 
@@ -59,7 +191,10 @@
     function idbRegisterSpace(name) {
         try {
             var saved = JSON.parse(localStorage.getItem('krkr2-spaces') || '[]');
-            if (saved.indexOf(name) < 0) { saved.push(name); localStorage.setItem('krkr2-spaces', JSON.stringify(saved)); }
+            if (saved.indexOf(name) < 0) {
+                saved.push(name);
+                localStorage.setItem('krkr2-spaces', JSON.stringify(saved));
+            }
         } catch (e) {}
     }
 
@@ -73,32 +208,33 @@
 
     function idbDeleteSpace(spaceId) {
         return new Promise(function (resolve) {
+            if (currentIdb && currentSpaceId === spaceId) {
+                currentIdb.close();
+                currentIdb = null;
+                currentSpaceId = null;
+            }
             var req = indexedDB.deleteDatabase(IDB_PREFIX + spaceId);
             req.onsuccess = function () { idbUnregisterSpace(spaceId); resolve(); };
             req.onerror = function () { resolve(); };
+            req.onblocked = function () { resolve(); };
         });
     }
 
     function idbGetSpaceInfo(spaceId) {
-        return new Promise(function (resolve) {
-            var req = indexedDB.open(IDB_PREFIX + spaceId, 1);
-            req.onupgradeneeded = function (e) { e.target.result.createObjectStore('files'); };
-            req.onsuccess = function (e) {
-                var db = e.target.result;
-                try {
-                    var tx = db.transaction('files', 'readonly');
-                    var store = tx.objectStore('files');
-                    var count = 0, totalSize = 0;
-                    var cur = store.openCursor();
-                    cur.onsuccess = function (ev) {
-                        var c = ev.target.result;
-                        if (c) { count++; totalSize += c.value.byteLength || 0; c.continue(); }
-                        else { db.close(); resolve({ count: count, size: totalSize }); }
-                    };
-                    cur.onerror = function () { db.close(); resolve({ count: 0, size: 0 }); };
-                } catch (err) { db.close(); resolve({ count: 0, size: 0 }); }
+        return withSpace(spaceId, async function (db) {
+            var files = await readAllFromDatabase(db);
+            var meta = await readMetaFromDatabase(db);
+            return {
+                count: files.length,
+                size: files.reduce(function (sum, file) { return sum + file.data.byteLength; }, 0),
+                dirty: meta.dirty,
+                baseRevision: meta.baseRevision,
+                contentHash: meta.contentHash,
+                lastSyncedAt: meta.lastSyncedAt
             };
-            req.onerror = function () { resolve({ count: 0, size: 0 }); };
+        }).catch(function () {
+            return { count: 0, size: 0, dirty: false, baseRevision: null,
+                contentHash: null, lastSyncedAt: null };
         });
     }
 
@@ -107,7 +243,6 @@
         if (files.length === 0) return;
         await window.KrKr2FS.waitForFS();
         for (var i = 0; i < files.length; i++) {
-            // MEMFS 镜像（遗留 fopen 读）+ VLFS overlay（引擎读流优先走 VLFS）
             window.KrKr2FS.writeFileToFS(files[i].path, files[i].data);
             VLFS.registerOverlayFile(files[i].path, new Uint8Array(files[i].data));
         }
@@ -115,49 +250,32 @@
     }
 
     async function idbExportZip(spaceId) {
-        var db = await new Promise(function (resolve, reject) {
-            var req = indexedDB.open(IDB_PREFIX + spaceId, 1);
-            req.onupgradeneeded = function (e) { e.target.result.createObjectStore('files'); };
-            req.onsuccess = function (e) { resolve(e.target.result); };
-            req.onerror = function () { reject(req.error); };
-        });
-        var files = await new Promise(function (resolve) {
-            var tx = db.transaction('files', 'readonly');
-            var results = [];
-            var cur = tx.objectStore('files').openCursor();
-            cur.onsuccess = function (e) {
-                var c = e.target.result;
-                if (c) { results.push({ path: c.key, data: c.value }); c.continue(); }
-                else { resolve(results); }
-            };
-            cur.onerror = function () { resolve(results); };
-        });
-        db.close();
+        var snapshot = await idbSnapshot(spaceId);
         var zip = new JSZip();
-        for (var i = 0; i < files.length; i++) {
-            zip.file(files[i].path.replace(/^\//, ''), files[i].data);
+        for (var i = 0; i < snapshot.files.length; i++) {
+            zip.file(snapshot.files[i].path.replace(/^\//, ''), snapshot.files[i].data);
         }
-        var blob = await zip.generateAsync({ type: 'blob' });
+        var blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
         var a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
         a.download = spaceId + '-saves.zip';
         a.click();
-        URL.revokeObjectURL(a.href);
+        setTimeout(function () { URL.revokeObjectURL(a.href); }, 0);
     }
 
     async function idbImportZip(file) {
         var zip = await JSZip.loadAsync(file);
         var spaceName = file.name.replace(/\.zip$/i, '').replace(/-saves$/, '');
-        await idbOpen(spaceName);
-        idbRegisterSpace(spaceName);
         var entries = [];
-        zip.forEach(function (p, e) { if (!e.dir) entries.push({ path: p, entry: e }); });
+        zip.forEach(function (p, e) {
+            if (!e.dir) entries.push({ path: '/' + p.replace(/^\/+/, ''), entry: e });
+        });
+        var files = [];
         for (var i = 0; i < entries.length; i++) {
-            var data = await entries[i].entry.async('uint8array');
-            var path = '/' + entries[i].path;
-            idbSaveFile(path, data);
+            files.push({ path: entries[i].path, data: await entries[i].entry.async('uint8array') });
         }
-        if (currentIdb) { currentIdb.close(); currentIdb = null; }
+        await idbReplaceFiles(spaceName, files, { dirty: true, baseRevision: null });
+        idbRegisterSpace(spaceName);
         return spaceName;
     }
 
@@ -165,6 +283,11 @@
         open: idbOpen,
         saveFile: idbSaveFile,
         loadAll: idbLoadAll,
+        snapshot: idbSnapshot,
+        getSyncMeta: idbGetSyncMeta,
+        setSyncMeta: idbSetSyncMeta,
+        replaceFiles: idbReplaceFiles,
+        whenIdle: idbWhenIdle,
         listSpaces: idbListSpaces,
         registerSpace: idbRegisterSpace,
         unregisterSpace: idbUnregisterSpace,

@@ -13,7 +13,9 @@ const DEFAULTS = {
     // 默认关。开着能显著减少游玩中的加载等待、最终整包落到本地，但代价
     // 是会下载你可能永远不会看到的分支与结局资源，弱网下还可能与按需读
     // 抢带宽而短期内更卡。这个取舍得由玩家自己做，不能替他选。
-    playWhileDownloading: false
+    playWhileDownloading: false,
+    // 回到游戏库时只提示存在本地改动，绝不自动上传。
+    saveSyncReminder: true
 };
 
 function readAll() {

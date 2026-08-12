@@ -161,6 +161,7 @@ onUnmounted(() => {
             <span>Kirikiroid2</span>
         </a>
         <div class="detail-nav-actions">
+            <a class="btn btn-ghost btn-sm" href="/settings">设置</a>
             <a class="btn btn-ghost btn-sm" href="/">返回游戏库</a>
             <AccountMenu />
         </div>

@@ -74,6 +74,12 @@ export default {
                 return withSecurityHeaders(asset);
             }
 
+            // --- 设置页：复用画廊轻量入口，不加载引擎 --------------------
+            if (pathname === '/settings' && isDocumentRequest(request)) {
+                const asset = await serveAsset(env, request, url, '/index.html');
+                return withSecurityHeaders(asset);
+            }
+
             // --- 后台：/admin[/*] ---------------------------------------
             // 不在此处拦截未登录请求：真正的防线是 /api/admin/* 的 session 校验。
             // admin.html 只是个登录壳，后台主体是登录成功后才动态 import 的 chunk。

@@ -18,8 +18,12 @@ function legacySpaceIdFor(game) {
 
 function openSpace(name) {
     return new Promise((resolve, reject) => {
-        const req = indexedDB.open('krkr2-space-' + name, 1);
-        req.onupgradeneeded = (e) => e.target.result.createObjectStore('files');
+        const req = indexedDB.open('krkr2-space-' + name, 2);
+        req.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains('files')) db.createObjectStore('files');
+            if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
+        };
         req.onsuccess = (e) => resolve(e.target.result);
         req.onerror = () => reject(req.error);
     });

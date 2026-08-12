@@ -43,7 +43,7 @@
         <details>
             <summary>关于本站</summary>
             <div class="about">
-                <p>在浏览器里直接运行 Kirikiri2（吉里吉里2）引擎的视觉小说，不需要安装任何东西。引擎经 WebAssembly 编译，游戏完全在你的设备上运行——存档和游戏文件都不会上传。</p>
+                <p>在浏览器里直接运行 Kirikiroid2（吉里吉里2）引擎的视觉小说，不需要安装任何东西。游戏完全在你的设备上运行；存档只有在你登录并手动同步时才会上传。</p>
 
                 <h3>用法</h3>
                 <ul>
@@ -75,6 +75,10 @@
          为 pwa.js 提供 KrKr2Config（buildVersion / pwa 开关 / assetBase）。 -->
     <script src="/build-config.js"></script>
     <script src="/js/config.js"></script>
+
+    <!-- 首页与设置页需要读取本地存档并在用户点击后打包；不加载 WASM。 -->
+    <script src="/js/vendor/jszip.min.js"></script>
+    <script src="/js/storage/idb.js"></script>
 
     <!-- 缓存与预下载。画廊页不加载引擎，靠这几支独立操作 OPFS 完成
          完整下载、用量展示与分游戏清理。 -->

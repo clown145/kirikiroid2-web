@@ -46,8 +46,12 @@ const r = await page.evaluate(async () => {
     const exports = Object.keys(m);
 
     const open = (n) => new Promise((res) => {
-        const rq = indexedDB.open('krkr2-space-' + n, 1);
-        rq.onupgradeneeded = (e) => e.target.result.createObjectStore('files');
+        const rq = indexedDB.open('krkr2-space-' + n, 2);
+        rq.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains('files')) db.createObjectStore('files');
+            if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
+        };
         rq.onsuccess = (e) => res(e.target.result);
     });
     const readAll = (db) => new Promise((res) => {
@@ -84,7 +88,29 @@ const r = await page.evaluate(async () => {
         ? m.spaceIdFor({ id: 'gid-777', title: '全新标题' })
         : 'game_gid-777');
 
-    return { exports, did, target, files, again, sameAfterRename };
+    // v2：同步基线写入后，下一次游戏写文件必须在同一事务把 dirty 置回 true，
+    // 且不能丢掉 baseRevision（它是之后判断双设备分叉的依据）。
+    await window.KrKr2IDB.open(target);
+    await window.KrKr2IDB.setSyncMeta(target, {
+        dirty: false,
+        baseRevision: '11111111-1111-4111-8111-111111111111',
+        contentHash: 'a'.repeat(64)
+    });
+    await window.KrKr2IDB.saveFile('/savedata/c.ksd', new Uint8Array([7, 7, 7]));
+    await window.KrKr2IDB.whenIdle();
+    const syncMeta = await window.KrKr2IDB.getSyncMeta(target);
+
+    const cloud = await import('/src/shared/cloudSaves.js');
+    const head = { id: syncMeta.baseRevision, contentHash: 'a'.repeat(64) };
+    const nextHead = { id: '22222222-2222-4222-8222-222222222222', contentHash: 'b'.repeat(64) };
+    const stateUpload = cloud.classifySync({ files: [{ path: '/x' }], meta: syncMeta }, head);
+    const stateConflict = cloud.classifySync({ files: [{ path: '/x' }], meta: syncMeta }, nextHead);
+    const stateDownload = cloud.classifySync({ files: [], meta: {
+        dirty: false, baseRevision: syncMeta.baseRevision, contentHash: 'a'.repeat(64)
+    } }, nextHead);
+
+    return { exports, did, target, files, again, sameAfterRename, syncMeta,
+        stateUpload, stateConflict, stateDownload };
 });
 
 console.log(`    exports: ${r.exports.join(', ')}`);
@@ -93,6 +119,11 @@ ok(r.files.length === 2, `新空间 ${r.target} 收到 2 个存档（实际 ${r.
 ok(JSON.stringify(r.files) === JSON.stringify(['/savedata/a.ksd', '/savedata/b.ksd']), '存档路径不变');
 ok(r.again === false, '二次调用不重复迁移（幂等）');
 ok(r.sameAfterRename, '改标题后空间名不变（绑 id 而非 title）');
+ok(r.syncMeta.dirty === true, '游戏写文件后在同一事务标记待同步');
+ok(r.syncMeta.baseRevision === '11111111-1111-4111-8111-111111111111', '新写入保留同步基线');
+ok(r.stateUpload === 'upload', '本机基于当前 head 的变化判为上传');
+ok(r.stateConflict === 'conflict', '本机与云端同时变化判为冲突');
+ok(r.stateDownload === 'download', '本机未变化且云端前进判为下载');
 
 await browser.close();
 vite.kill();

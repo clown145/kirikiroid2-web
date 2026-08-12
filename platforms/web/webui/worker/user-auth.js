@@ -321,6 +321,11 @@ async function readSession(request, db) {
     };
 }
 
+/** 供账号私有 API 复用；返回已验证且未过期的玩家 session。 */
+export function getAccountSession(request, env) {
+    return readSession(request, env.DB);
+}
+
 async function touchSession(db, session) {
     if (!session || Date.now() - session.lastSeenAt < 60 * 60 * 1000) return;
     await db.prepare(
