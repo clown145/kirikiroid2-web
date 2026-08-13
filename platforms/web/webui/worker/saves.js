@@ -3,8 +3,8 @@
 import { json, error } from './headers.js';
 import { getAccountSession } from './user-auth.js';
 
-const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
-const MAX_ACCOUNT_BYTES = 512 * 1024 * 1024;
+const MAX_ARCHIVE_BYTES = 100 * 1024 * 1024;
+const MAX_ACCOUNT_BYTES = 100 * 1024 * 1024;
 const KEEP_REVISIONS = 20;
 
 function decodeSegment(value) {
@@ -132,7 +132,7 @@ async function uploadRevision(request, env, ctx, userId, gameId) {
     if (!Number.isSafeInteger(declaredSize) || declaredSize <= 0) {
         return error(411, '存档上传必须提供 Content-Length');
     }
-    if (declaredSize > MAX_ARCHIVE_BYTES) return error(413, '单个存档版本不能超过 64 MB');
+    if (declaredSize > MAX_ARCHIVE_BYTES) return error(413, '单个存档版本不能超过 100 MB');
 
     const baseRevision = request.headers.get('X-KrKr2-Base-Revision') || null;
     if (baseRevision && !cleanRevision(baseRevision)) return error(400, '无效的基线版本');
@@ -184,7 +184,7 @@ async function uploadRevision(request, env, ctx, userId, gameId) {
     const byteSize = Number(object?.size || declaredSize || 0);
     if (!object || byteSize !== declaredSize || byteSize > MAX_ARCHIVE_BYTES) {
         await env.SAVES.delete(objectKey);
-        return error(413, '单个存档版本不能超过 64 MB');
+        return error(413, '单个存档版本不能超过 100 MB');
     }
     if (Number(usage?.bytes || 0) + byteSize > MAX_ACCOUNT_BYTES) {
         await env.SAVES.delete(objectKey);
