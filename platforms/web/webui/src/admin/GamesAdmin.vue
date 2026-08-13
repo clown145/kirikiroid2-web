@@ -19,6 +19,7 @@ const form = ref(blankForm());
 const formError = ref('');
 
 const importInput = ref(null);
+const manifestInput = ref(null);
 const dragIndex = ref(null);
 
 function blankForm() {
@@ -197,6 +198,114 @@ function exportJson() {
     URL.revokeObjectURL(a.href);
 }
 
+// --- 清单 (manifest.json) 原地生成 ----------------------------------
+
+function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
+}
+
+async function scanDirectoryHandle(dirHandle, relativePath = '') {
+    let filesList = [];
+    for await (const [name, handle] of dirHandle.entries()) {
+        if (
+            name === '.DS_Store' ||
+            name === 'Thumbs.db' ||
+            name === 'manifest.json' ||
+            name.toLowerCase().endsWith('.exe')
+        ) {
+            continue;
+        }
+        const itemRelativePath = relativePath ? `${relativePath}/${name}` : name;
+        if (handle.kind === 'directory') {
+            const subFiles = await scanDirectoryHandle(handle, itemRelativePath);
+            filesList = filesList.concat(subFiles);
+        } else if (handle.kind === 'file') {
+            const file = await handle.getFile();
+            filesList.push({
+                name: itemRelativePath.replace(/\\/g, '/'),
+                size: file.size
+            });
+        }
+    }
+    return filesList;
+}
+
+async function generateManifest() {
+    if (typeof window.showDirectoryPicker === 'function') {
+        try {
+            const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+            toast.info('正在扫描文件夹并生成清单...');
+            const files = await scanDirectoryHandle(dirHandle);
+            if (files.length === 0) {
+                toast.error('未在选择的文件夹中发现有效游戏资源');
+                return;
+            }
+            const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
+            const manifestContent = JSON.stringify(files, null, 2);
+
+            // 直接在所选文件夹根目录创建并写入 manifest.json
+            const fileHandle = await dirHandle.getFileHandle('manifest.json', { create: true });
+            const writable = await fileHandle.createWritable();
+            await writable.write(manifestContent);
+            await writable.close();
+
+            toast.success(`✅ 已扫描 ${files.length} 个文件 (${formatBytes(totalBytes)})，manifest.json 已成功保存到游戏目录！`);
+        } catch (err) {
+            if (err?.name === 'AbortError') return; // 用户取消选择
+            toast.error('生成清单失败: ' + (err.message || String(err)));
+        }
+    } else {
+        // 不支持 File System Access API 的环境降级触发文件下载
+        if (manifestInput.value) {
+            manifestInput.value.click();
+        }
+    }
+}
+
+function onFallbackFolderSelect(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (!files.length) return;
+
+    const manifest = [];
+    let totalBytes = 0;
+    for (const file of files) {
+        const name = file.name;
+        if (
+            name === '.DS_Store' ||
+            name === 'Thumbs.db' ||
+            name === 'manifest.json' ||
+            name.toLowerCase().endsWith('.exe')
+        ) {
+            continue;
+        }
+        const relPath = (file.webkitRelativePath || file.name).replace(/^[^/]+\//, '');
+        manifest.push({
+            name: relPath.replace(/\\/g, '/'),
+            size: file.size
+        });
+        totalBytes += file.size;
+    }
+
+    if (!manifest.length) {
+        toast.error('未在选择的文件夹中发现有效游戏资源');
+        return;
+    }
+
+    const blob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'manifest.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+
+    toast.success(`已生成 ${manifest.length} 个文件 (${formatBytes(totalBytes)}) 的清单并触发下载，请将其放入游戏文件夹。`);
+}
+
 onMounted(refresh);
 </script>
 
@@ -219,9 +328,11 @@ onMounted(refresh);
                 <span class="hint">共 {{ games.length }} 个条目，拖动行可调整顺序</span>
             </div>
             <div class="toolbar-right">
+                <button class="btn btn-sm" title="选择本地游戏文件夹，自动生成并原地保存 manifest.json" @click="generateManifest">⚡ 生成游戏清单</button>
                 <button class="btn btn-sm" @click="importInput.click()">导入 JSON</button>
                 <button class="btn btn-sm" @click="exportJson" :disabled="!games.length">导出 JSON</button>
                 <input ref="importInput" type="file" accept=".json,application/json" hidden @change="onImport">
+                <input ref="manifestInput" type="file" webkitdirectory directory multiple hidden @change="onFallbackFolderSelect">
             </div>
         </div>
 

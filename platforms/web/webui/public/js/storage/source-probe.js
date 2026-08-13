@@ -214,11 +214,13 @@
      * 只需一个普通 GET。
      */
     async function prepareManifestItem(item, manifestUrl, manifestProbe) {
-        if (!item || !String(item.name || '').trim() ||
-            !String(item.url || '').trim()) return null;
+        if (!item || !String(item.name || '').trim()) return null;
         var path = normalizeResourcePath(item.name);
         if (path === '/') throw new Error('Game manifest contains an empty resource path');
-        var url = resolveResourceUrl(item.url, manifestUrl);
+        var rawUrl = (item.url !== undefined && item.url !== null && String(item.url).trim() !== '')
+            ? String(item.url).trim()
+            : item.name.split('/').map(encodeURIComponent).join('/');
+        var url = resolveResourceUrl(rawUrl, manifestUrl);
         if (isManifestSelfReference(url, manifestUrl)) {
             console.warn('[manifest] 忽略指向清单自身的资源：' + path);
             return null;
