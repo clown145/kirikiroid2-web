@@ -24,19 +24,18 @@ function formatSize(bytes) {
 async function refresh() {
     loading.value = true;
     try {
-        const names = await IDB().listSpaces();
-        // 先把列表渲染出来，每个空间的体积再逐个异步填充，
-        // 避免空间多时白屏等待
-        spaces.value = names.map((name) => ({ name, count: null, size: null }));
-        loading.value = false;
-
-        await Promise.all(spaces.value.map(async (entry) => {
-            const info = await IDB().getSpaceInfo(entry.name);
-            entry.count = info.count;
-            entry.size = info.size;
-        }));
+        const idb = IDB();
+        await idb.whenIdle();
+        const names = await idb.listSpaces();
+        const list = [];
+        for (const name of names) {
+            const info = await idb.getSpaceInfo(name);
+            list.push({ name, ...info });
+        }
+        spaces.value = list;
     } catch (err) {
-        status.value = '读取失败: ' + err.message;
+        status.value = '无法读取存档空间: ' + err.message;
+    } finally {
         loading.value = false;
     }
 }
@@ -46,15 +45,24 @@ async function exportSpace(name) {
     try {
         await IDB().exportZip(name);
         status.value = '已导出 ' + name;
+        toast.success('已导出 ' + name);
     } catch (err) {
         status.value = '导出失败: ' + err.message;
+        toast.error('导出失败: ' + err.message);
     }
 }
 
 async function removeSpace(name) {
-    if (!confirm(`删除存档空间「${name}」？此操作不可撤销。`)) return;
+    const ok = await showConfirm({
+        title: '删除存档空间',
+        message: `删除存档空间「${name}」？此操作不可撤销。`,
+        confirmText: '确认删除',
+        danger: true
+    });
+    if (!ok) return;
     await IDB().deleteSpace(name);
     status.value = '已删除 ' + name;
+    toast.success('已删除 ' + name);
     refresh();
 }
 

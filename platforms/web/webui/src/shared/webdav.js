@@ -64,7 +64,8 @@ export function saveWebDavConfig(input) {
         username: String(input.username || '').trim(),
         password: String(input.password || ''),
         root: normalizeRoot(input.root),
-        rememberPassword: !!input.rememberPassword
+        rememberPassword: !!input.rememberPassword,
+        supportsConditional: input.supportsConditional !== false
     };
     if (current && configSignature(current) !== configSignature(next)) next.id = crypto.randomUUID();
     const persisted = { ...next };
@@ -157,17 +158,14 @@ function createClient(rawConfig) {
             !Array.isArray(manifest.revisions)) {
             throw new Error(`《${gameId}》的 WebDAV manifest.json 格式不受支持`);
         }
-        const etag = response.headers.get('ETag');
-        if (!etag) {
-            throw new Error('WebDAV 未向浏览器暴露 ETag，无法安全处理多设备同步');
-        }
+        const etag = response.headers.get('ETag') || null;
         return { manifest, etag };
     }
 
-    async function writeManifest(gameId, manifest, etag) {
+    async function writeManifest(gameId, manifest, etag = null) {
         const headers = { 'Content-Type': 'application/json; charset=utf-8' };
         if (etag) headers['If-Match'] = etag;
-        else headers['If-None-Match'] = '*';
+        else if (config.supportsConditional !== false) headers['If-None-Match'] = '*';
         const response = await request(['games', gameId, 'manifest.json'], {
             method: 'PUT',
             headers,
@@ -241,9 +239,13 @@ export function createWebDavBackend(rawConfig) {
 
         const id = crypto.randomUUID();
         const archiveName = `${id}.zip`;
+        const archiveHeaders = { 'Content-Type': 'application/zip' };
+        if (client.config.supportsConditional !== false) {
+            archiveHeaders['If-None-Match'] = '*';
+        }
         await client.request(['games', game.id, 'revisions', archiveName], {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/zip', 'If-None-Match': '*' },
+            headers: archiveHeaders,
             body: archive.bytes
         });
         const revision = {
@@ -323,6 +325,15 @@ export function createWebDavBackend(rawConfig) {
         return restored;
     }
 
+    async function deleteSave(gameId) {
+        try {
+            await client.request(['games', gameId], { method: 'DELETE' }, [404]);
+            return true;
+        } catch (err) {
+            throw new Error(`删除 WebDAV 存档失败: ${err?.message || err}`);
+        }
+    }
+
     return {
         kind: 'webdav',
         targetKey,
@@ -332,7 +343,8 @@ export function createWebDavBackend(rawConfig) {
         history,
         upload,
         archive,
-        restore
+        restore,
+        delete: deleteSave
     };
 }
 
@@ -340,41 +352,68 @@ export async function testWebDavConnection(config) {
     const client = createClient(config);
     await client.ensureRoot();
     const name = `.krkr2-test-${crypto.randomUUID()}.json`;
-    await client.request([name], {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'If-None-Match': '*' },
-        body: JSON.stringify({ createdAt: Date.now() })
-    });
-    const duplicate = await client.request([name], {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'If-None-Match': '*' },
-        body: JSON.stringify({ duplicateAt: Date.now() })
-    }, [409, 412]);
-    if (duplicate.status !== 409 && duplicate.status !== 412) {
-        await client.request([name], { method: 'DELETE' }).catch(() => {});
-        throw new Error('连接成功，但 WebDAV 未执行 If-None-Match 条件写入');
+    
+    // 1. 测试文件写入
+    try {
+        await client.request([name], {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ createdAt: Date.now() })
+        });
+    } catch (err) {
+        throw new Error(`WebDAV 写入测试失败: ${err?.message || err}`);
     }
-    const response = await client.request([name], { method: 'GET' });
-    await response.arrayBuffer();
-    const etag = response.headers.get('ETag');
-    if (!etag) {
-        await client.request([name], { method: 'DELETE' }).catch(() => {});
-        throw new Error('连接成功，但服务端未通过 CORS 暴露 ETag 响应头');
+
+    let supportsConditional = true;
+
+    // 2. 测试 If-None-Match 条件写入
+    try {
+        const duplicate = await client.request([name], {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'If-None-Match': '*' },
+            body: JSON.stringify({ duplicateAt: Date.now() })
+        }, [200, 201, 204, 409, 412]);
+        if (duplicate.status !== 409 && duplicate.status !== 412) {
+            supportsConditional = false;
+        }
+    } catch {
+        supportsConditional = false;
     }
-    await client.request([name], {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'If-Match': etag },
-        body: JSON.stringify({ updatedAt: Date.now() })
-    });
-    const stale = await client.request([name], {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'If-Match': etag },
-        body: JSON.stringify({ staleWriteAt: Date.now() })
-    }, [409, 412]);
-    if (stale.status !== 409 && stale.status !== 412) {
-        await client.request([name], { method: 'DELETE' }).catch(() => {});
-        throw new Error('连接成功，但 WebDAV 未执行 If-Match 条件写入，无法安全处理多设备同步');
+
+    // 3. 测试 GET 与 ETag 响应头
+    let etag = null;
+    try {
+        const response = await client.request([name], { method: 'GET' });
+        await response.arrayBuffer();
+        etag = response.headers.get('ETag');
+        if (!etag) supportsConditional = false;
+    } catch {
+        supportsConditional = false;
     }
-    await client.request([name], { method: 'DELETE' });
-    return true;
+
+    // 4. 如果支持 ETag，测试 If-Match
+    if (etag && supportsConditional) {
+        try {
+            await client.request([name], {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', 'If-Match': etag },
+                body: JSON.stringify({ updatedAt: Date.now() })
+            });
+            const stale = await client.request([name], {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', 'If-Match': etag },
+                body: JSON.stringify({ staleWriteAt: Date.now() })
+            }, [200, 201, 204, 409, 412]);
+            if (stale.status !== 409 && stale.status !== 412) {
+                supportsConditional = false;
+            }
+        } catch {
+            supportsConditional = false;
+        }
+    }
+
+    // 5. 清理测试文件
+    await client.request([name], { method: 'DELETE' }).catch(() => {});
+    
+    return { ok: true, supportsConditional };
 }

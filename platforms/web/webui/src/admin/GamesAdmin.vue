@@ -2,6 +2,8 @@
 import { ref, computed, onMounted } from 'vue';
 import { api, coverSrc } from '../shared/api.js';
 import BackToGallery from '../shared/BackToGallery.vue';
+import { showConfirm } from '../shared/dialog.js';
+import { toast } from '../shared/toast.js';
 
 const emit = defineEmits(['logout']);
 
@@ -26,8 +28,7 @@ function blankForm() {
 const isNew = computed(() => editId.value === null);
 
 function flash(msg) {
-    status.value = msg;
-    setTimeout(() => { if (status.value === msg) status.value = ''; }, 3000);
+    toast.info(msg);
 }
 
 async function refresh() {
@@ -35,7 +36,7 @@ async function refresh() {
     try {
         games.value = await api.adminListGames();
     } catch (err) {
-        flash('加载失败: ' + err.message);
+        toast.error('加载失败: ' + err.message);
     } finally {
         loading.value = false;
     }
@@ -88,12 +89,12 @@ async function save() {
         if (isNew.value) {
             const created = await api.createGame(payload);
             games.value.push(created);
-            flash('已添加');
+            toast.success('已添加游戏');
         } else {
             const updated = await api.updateGame(editId.value, payload);
             const i = games.value.findIndex((g) => g.id === editId.value);
             if (i !== -1) games.value[i] = updated;
-            flash('已保存');
+            toast.success('已保存修改');
         }
         editing.value = false;
         await refresh();   // 重新拉一次以拿到服务端排序
@@ -105,13 +106,19 @@ async function save() {
 }
 
 async function remove(g) {
-    if (!confirm(`删除「${g.title}」？此操作不可撤销。\n（玩家已有的存档不会被删除）`)) return;
+    const ok = await showConfirm({
+        title: '删除游戏',
+        message: `删除「${g.title}」？此操作不可撤销。\n（玩家已有的本地存档不会被删除）`,
+        confirmText: '确认删除',
+        danger: true
+    });
+    if (!ok) return;
     try {
         await api.deleteGame(g.id);
         games.value = games.value.filter((x) => x.id !== g.id);
-        flash('已删除');
+        toast.success('已删除');
     } catch (err) {
-        flash('删除失败: ' + err.message);
+        toast.error('删除失败: ' + err.message);
     }
 }
 
@@ -542,6 +549,7 @@ onMounted(refresh);
 
 @media (max-width: 640px) {
     .body { padding: var(--space-4); }
-    .col-state { display: none; }
+    .col-drag { display: none; }
+    .col-state { display: flex; flex-direction: column; gap: 4px; }
 }
 </style>

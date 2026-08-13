@@ -7,6 +7,7 @@ import ssl
 import os
 import sys
 import threading
+import urllib.parse
 
 mimetypes.add_type('application/manifest+json', '.webmanifest')
 
@@ -53,6 +54,18 @@ def content_sha256(real_path):
         return digest
 
 class COIHandler(http.server.SimpleHTTPRequestHandler):
+    def _rewrite_mpa_route(self):
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == '/admin':
+            entry = '/admin.html'
+        elif parsed.path == '/play' or parsed.path.startswith('/play/'):
+            entry = '/play.html'
+        else:
+            return
+
+        self.path = urllib.parse.urlunsplit(
+            ('', '', entry, parsed.query, parsed.fragment))
+
     def end_headers(self):
         self.send_header('Cross-Origin-Opener-Policy', 'same-origin')
         self.send_header('Cross-Origin-Embedder-Policy', 'require-corp')
@@ -63,6 +76,7 @@ class COIHandler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self):
+        self._rewrite_mpa_route()
         if xp3_real_path and self.path == '/data.xp3':
             self._serve_file(xp3_real_path)
         elif zip_real_path and self.path == '/game.zip':
@@ -71,6 +85,7 @@ class COIHandler(http.server.SimpleHTTPRequestHandler):
             super().do_GET()
 
     def do_HEAD(self):
+        self._rewrite_mpa_route()
         if xp3_real_path and self.path == '/data.xp3':
             self._serve_file(xp3_real_path, head_only=True)
         elif zip_real_path and self.path == '/game.zip':

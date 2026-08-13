@@ -51,11 +51,16 @@ function beginAuth(provider, link = false) {
 }
 
 function positionMenu() {
+    if (!showMenu.value) return;
     const rect = root.value?.getBoundingClientRect();
     if (!rect) return;
+    const menuTop = Math.round(rect.bottom + 8);
+    const menuRight = Math.max(12, Math.round(innerWidth - rect.right));
+    const availableHeight = Math.max(200, window.innerHeight - menuTop - 16);
     menuPosition.value = {
-        top: `${Math.round(rect.bottom + 8)}px`,
-        right: `${Math.max(12, Math.round(innerWidth - rect.right))}px`
+        top: `${menuTop}px`,
+        right: `${menuRight}px`,
+        maxHeight: `${availableHeight}px`
     };
 }
 
@@ -134,7 +139,7 @@ function consumeAuthResult() {
         status.value = ERROR_MESSAGES[authError] || ERROR_MESSAGES.login_failed;
         showMenu.value = true;
     }
-    if (!authError && url.searchParams.get('authSuccess')) status.value = '';
+    if (!authError && url.searchParams.has('authSuccess')) status.value = '';
     if (authError || url.searchParams.has('authSuccess')) {
         url.searchParams.delete('authError');
         url.searchParams.delete('authSuccess');
@@ -147,7 +152,8 @@ onMounted(async () => {
     await refreshAccount();
     if (showMenu.value) await nextTick(positionMenu);
     document.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('resize', positionMenu);
+    window.addEventListener('resize', positionMenu, { passive: true });
+    window.addEventListener('scroll', positionMenu, { passive: true });
 });
 
 onUnmounted(() => {

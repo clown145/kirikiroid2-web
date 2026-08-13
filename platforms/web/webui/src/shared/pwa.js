@@ -32,11 +32,13 @@ export async function forceUpdate() {
     location.reload();
 }
 
+window.KrKr2PWA = { forceUpdate };
+
 const forceBtn = document.getElementById('force-update-btn');
 if (forceBtn) {
     forceBtn.addEventListener('click', (e) => {
         e.preventDefault();
-        if (confirm('清除缓存的应用文件并加载最新版本？\n存档数据会保留。')) forceUpdate();
+        forceUpdate();
     });
 }
 

@@ -90,15 +90,31 @@ const TOUCH_START_ZONE_PX = 48;
 const TOUCH_DRAG_PX = 16;
 
 let touchStartY = null;
+let lastTopTap = 0;
+
 function onTouchStart(e) {
     touchStartY = e.touches[0]?.clientY ?? null;
 }
+
 function onTouchMove(e) {
     if (touchStartY === null) return;
     const y = e.touches[0]?.clientY ?? 0;
     if (touchStartY <= TOUCH_START_ZONE_PX && y - touchStartY > TOUCH_DRAG_PX) {
         reveal();
         touchStartY = null;
+    }
+}
+
+function onTouchEnd(e) {
+    const touch = e.changedTouches[0];
+    if (touch && touch.clientY <= 64) {
+        const now = Date.now();
+        if (now - lastTopTap < 380) {
+            reveal();
+            lastTopTap = 0;
+        } else {
+            lastTopTap = now;
+        }
     }
 }
 
@@ -139,6 +155,7 @@ onMounted(() => {
     window.addEventListener('pointermove', onPointerMove, { passive: true });
     window.addEventListener('touchstart', onTouchStart, TOUCH_OPTS);
     window.addEventListener('touchmove', onTouchMove, TOUCH_OPTS);
+    window.addEventListener('touchend', onTouchEnd, TOUCH_OPTS);
     window.addEventListener('keydown', onKeydown);
     // 提示和把手一起退场：提示先走的话，会出现"箭头还亮着但没人解释它"的空档
     hintTimer = setTimeout(() => { showHint.value = false; }, HANDLE_FADE_MS);
@@ -148,6 +165,7 @@ onUnmounted(() => {
     window.removeEventListener('pointermove', onPointerMove);
     window.removeEventListener('touchstart', onTouchStart, TOUCH_OPTS);
     window.removeEventListener('touchmove', onTouchMove, TOUCH_OPTS);
+    window.removeEventListener('touchend', onTouchEnd, TOUCH_OPTS);
     window.removeEventListener('keydown', onKeydown);
     clearTimeout(hideTimer);
     clearTimeout(fadeTimer);
@@ -280,22 +298,23 @@ onUnmounted(() => {
 }
 .handle:not(.touch):hover { opacity: 1; }
 
-/* 淡出后：视觉上完全消失，但仍留一条 24px 的贴顶命中带。
-   背景/箭头都透明，所以不挡画面；顶边下滑被系统手势吃掉时还能点它兜底。
-   transition 只作用在观感属性上，命中区是瞬时收窄的。 */
+/* 淡出后：保留低对比微弱指示点与充足触控热区 */
 .handle.dimmed {
-    opacity: 0;
-    min-height: 24px;
+    opacity: 0.12;
+    min-height: 32px;
+    width: 64px;
     padding: 0;
-    background: transparent;
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
+    background: rgba(10, 10, 11, 0.25);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
     transition: opacity 1.2s var(--ease);
 }
 
-/* 淡出后再按下时给一点反馈，让人确认自己点中了 */
+/* 淡出后再按下或悬停时给明确反馈 */
+.handle.dimmed:hover,
 .handle.dimmed:active {
-    opacity: 0.7;
+    opacity: 0.85;
+    background: rgba(10, 10, 11, 0.6);
     transition: opacity 80ms var(--ease);
 }
 

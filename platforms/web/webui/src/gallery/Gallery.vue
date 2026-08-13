@@ -8,6 +8,9 @@ import { localSaveSummary } from '../shared/cloudSaves.js';
 import { useFolderAccess } from '../shared/folderAccess.js';
 import { getSetting, setSetting } from '../shared/settings.js';
 import GameCard from './GameCard.vue';
+import SiteFooter from './SiteFooter.vue';
+import { showConfirm } from '../shared/dialog.js';
+import { toast } from '../shared/toast.js';
 
 const games = ref([]);
 const loading = ref(true);
@@ -21,6 +24,18 @@ const dirtySaveCount = ref(0);
 const preparingDownload = ref(null);
 const showIntro = ref(false);
 const INTRO_DISMISSED_KEY = 'krkr2-intro-dismissed';
+const COMPAT_DISMISSED_KEY = 'krkr2-compat-dismissed';
+
+const isIOS = typeof navigator !== 'undefined' && (
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+);
+const showCompatWarning = ref(isIOS && localStorage.getItem(COMPAT_DISMISSED_KEY) !== '1');
+
+function dismissCompatWarning() {
+    showCompatWarning.value = false;
+    try { localStorage.setItem(COMPAT_DISMISSED_KEY, '1'); } catch {}
+}
 
 const allTags = computed(() => {
     const counts = new Map();
@@ -144,7 +159,7 @@ async function onDownload(game) {
         storage.value = await window.KrKr2Cache.storageInfo();
     } catch (err) {
         preparingDownload.value = null;
-        alert('无法读取下载位置：' + (err?.message || err));
+        toast.error('无法读取下载位置：' + (err?.message || err));
         return;
     }
     if (storage.value.supported && storage.value.kind !== 'folder' &&
@@ -178,7 +193,7 @@ async function beginDownload(game) {
                         await waitForFolderAccess(game);
                     } else {
                         await refreshCache();
-                        alert('下载已停止：' + message);
+                        toast.warn('下载已停止：' + message);
                     }
                 });
             }
@@ -188,7 +203,7 @@ async function beginDownload(game) {
         if (isFolderPermissionError(err)) {
             void waitForFolderAccess(game);
         } else {
-            alert('无法开始下载：' + (err?.message || err));
+            toast.error('无法开始下载：' + (err?.message || err));
         }
     } finally {
         preparingDownload.value = null;
@@ -202,7 +217,7 @@ async function chooseFolder() {
         storage.value = await window.KrKr2Cache.storageInfo();
     } catch (err) {
         if (err?.name === 'AbortError') return;    // 用户取消了选择器
-        alert('绑定文件夹失败：' + (err?.message || err));
+        toast.error('绑定文件夹失败：' + (err?.message || err));
         return;
     }
     const game = pendingDownload.value;
@@ -270,9 +285,16 @@ async function removeCache(gameKey) {
 }
 
 async function removeAllCache() {
-    if (!confirm('清空所有游戏的本地缓存？下次游玩需要重新下载。')) return;
+    const ok = await showConfirm({
+        title: '清空全部本地缓存',
+        message: '清空所有游戏的本地缓存？下次游玩需要重新下载。\n（本地存档不受影响）',
+        confirmText: '确认清空',
+        danger: true
+    });
+    if (!ok) return;
     await window.KrKr2Cache?.removeAll();
     dlState.value = null;
+    toast.success('已清空全部本地缓存');
     await refreshCache();
     await refreshUsage();
 }
@@ -288,8 +310,9 @@ async function openCachePanel() {
 async function bindFolderFromPanel() {
     try {
         await window.KrKr2Cache.bindFolder();
+        toast.success('已绑定文件夹');
     } catch (err) {
-        if (err?.name !== 'AbortError') alert('绑定失败：' + (err?.message || err));
+        if (err?.name !== 'AbortError') toast.error('绑定失败：' + (err?.message || err));
     }
     storage.value = await window.KrKr2Cache.storageInfo();
     await folderAccess.check({ prompt: false });
@@ -298,11 +321,18 @@ async function bindFolderFromPanel() {
 }
 
 async function unbindFolderFromPanel() {
-    if (!confirm('不再使用该文件夹？已下载的文件会留在磁盘上，不会被删除。')) return;
+    const ok = await showConfirm({
+        title: '解除文件夹绑定',
+        message: '不再使用该文件夹？已下载的文件会留在磁盘上，不会被删除。',
+        confirmText: '解除绑定',
+        danger: false
+    });
+    if (!ok) return;
     await window.KrKr2Cache.unbindFolder();
     await folderAccess.check({ prompt: false });
     storage.value = await window.KrKr2Cache.storageInfo();
     dlState.value = null;
+    toast.success('已解除文件夹绑定');
     await refreshCache();
     await refreshUsage();
 }
@@ -394,6 +424,17 @@ onUnmounted(() => {
     </header>
 
     <main class="body">
+        <aside v-if="showCompatWarning" class="compat-notice" role="alert">
+            <p>
+                <strong>设备兼容性提示：</strong>当前浏览器环境为 iOS / WebKit，目前尚未支持 WASM JSPI 技术，暂无法运行游戏。建议在 PC、Mac、Android 或 Linux 设备上游玩。
+            </p>
+            <a href="/help#browser-compatibility">详情</a>
+            <button type="button" aria-label="关闭提示" title="关闭" @click="dismissCompatWarning">
+                <svg viewBox="0 0 24 24" fill="currentColor" width="15" height="15" aria-hidden="true">
+                    <path d="M18.3 5.71 12 12l6.3 6.29-1.41 1.42L10.59 13.41 4.3 19.71 2.89 18.3 9.17 12 2.89 5.71 4.3 4.29l6.29 6.3 6.3-6.3z" />
+                </svg>
+            </button>
+        </aside>
         <aside v-if="showIntro" class="intro-notice">
             <p>
                 游戏和存档都在本机运行。需要跨设备使用时，可登录使用站点云存档，
@@ -477,6 +518,8 @@ onUnmounted(() => {
                 @navigate="(e) => onNavigate(game, e)" />
         </div>
     </main>
+
+    <SiteFooter />
 
     <!-- 下载中的状态条。常驻可见，玩家才知道后台在跑什么、离开会怎样。 -->
     <div v-if="preparingDownload || (dlState && dlState.running)" class="dlbar">
@@ -599,6 +642,26 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.compat-notice {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 18px;
+    padding: 10px 12px;
+    border: 1px solid rgba(251, 191, 36, 0.35);
+    border-radius: var(--radius-sm);
+    background: rgba(30, 24, 12, 0.85);
+    color: #fef3c7;
+    font-size: 12px;
+    line-height: 1.55;
+}
+.compat-notice p { flex: 1; margin: 0; }
+.compat-notice strong { color: #fde68a; }
+.compat-notice a { flex: none; color: #fef08a; font-weight: 600; text-decoration: underline; }
+.compat-notice button { width: 28px; height: 28px; flex: none; display: grid; place-items: center; border-radius: 6px; color: #d97706; }
+.compat-notice button:hover { background: rgba(251, 191, 36, 0.2); color: #fde68a; }
+
 .intro-notice {
     min-height: 44px;
     display: flex;

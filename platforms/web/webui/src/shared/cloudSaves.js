@@ -157,6 +157,12 @@ function createSiteBackend() {
                 body: JSON.stringify({ revisionId, deviceId: device.id, deviceName: device.name })
             });
             return result.revision;
+        },
+        async delete(gameId) {
+            await fetchJson(`/api/saves/${encodeURIComponent(gameId)}`, {
+                method: 'DELETE'
+            });
+            return true;
         }
     };
 }
@@ -354,4 +360,18 @@ export async function localSaveSummary(games, backend) {
         rows.push({ game, ...info });
     }
     return rows;
+}
+
+export async function deleteRemoteSave(gameId, backend = getSyncBackend()) {
+    if (!backend?.delete) throw new Error('当前同步后端不支持删除云端存档');
+    await backend.delete(gameId);
+    const spaceId = spaceIdForGame(gameId);
+    try {
+        await IDB().setSyncTarget(spaceId, backend.targetKey, {
+            baseRevision: null,
+            contentHash: null,
+            lastSyncedAt: Date.now()
+        });
+    } catch {}
+    return true;
 }

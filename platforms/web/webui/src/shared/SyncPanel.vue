@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue';
 import { accountLoginUrl } from './api.js';
 import {
     classifySync,
+    deleteRemoteSave,
     downloadBoth,
     getSyncBackend,
     localSaveSummary,
@@ -13,6 +14,8 @@ import {
     syncAllGames,
     syncGame
 } from './cloudSaves.js';
+import { showConfirm } from './dialog.js';
+import { toast } from './toast.js';
 
 const props = defineProps({
     games: { type: Array, default: () => [] },
@@ -165,7 +168,13 @@ async function resolve(row, choice) {
         const message = choice === 'local'
             ? '确定使用本机版本？当前远端版本会保留在历史中。'
             : '确定使用远端版本？本机未同步的进度会被替换；需要保留时请先选择“下载两份”。';
-        if (!confirm(message)) return;
+        const ok = await showConfirm({
+            title: '解决存档冲突',
+            message,
+            confirmText: choice === 'local' ? '使用本机版本' : '使用远端版本',
+            danger: choice === 'cloud'
+        });
+        if (!ok) return;
     }
     running.value = true;
     try {
@@ -199,15 +208,45 @@ async function openHistory(row) {
 
 async function restore(revision) {
     if (!historyGame.value || running.value) return;
-    if (!confirm('恢复这个历史版本？它会成为新的最新版本，并替换本机存档。')) return;
+    const ok = await showConfirm({
+        title: '恢复历史版本',
+        message: '恢复这个历史版本？它会成为新的最新版本，并替换本机存档。',
+        confirmText: '恢复此版本',
+        danger: true
+    });
+    if (!ok) return;
     running.value = true;
     try {
         await restoreHistoricalRevision(historyGame.value, revision.id, backend.value);
         status.value = '历史版本已恢复为最新版本';
+        toast.success('历史版本已恢复为最新版本');
         historyGame.value = null;
         await refresh();
     } catch (err) {
         status.value = err.message || '恢复失败';
+        toast.error(err.message || '恢复失败');
+    } finally {
+        running.value = false;
+    }
+}
+
+async function deleteRemote(row) {
+    if (running.value) return;
+    const ok = await showConfirm({
+        title: '删除云端存档',
+        message: `确定清空《${row.game.title}》在 ${remoteName.value} 上的所有存档与历史版本？\n（本机已有的存档不会被删除）`,
+        confirmText: '清空云端存档',
+        danger: true
+    });
+    if (!ok) return;
+    running.value = true;
+    try {
+        await deleteRemoteSave(row.game.id, backend.value);
+        toast.success(`《${row.game.title}》的 ${remoteName.value} 存档已清空`);
+        if (historyGame.value?.id === row.game.id) historyGame.value = null;
+        await refresh();
+    } catch (err) {
+        toast.error(err.message || '删除远端存档失败');
     } finally {
         running.value = false;
     }
@@ -281,6 +320,7 @@ onMounted(async () => {
                                 </template>
                                 <button v-else class="btn btn-sm" :disabled="running" @click="runOne(row)">同步</button>
                                 <button v-if="row.remote" class="btn btn-ghost btn-sm" :disabled="running" @click="openHistory(row)">历史</button>
+                                <button v-if="row.remote" class="btn btn-ghost btn-sm btn-danger" :disabled="running" title="删除远端云存档" @click="deleteRemote(row)">清空云端</button>
                             </div>
                         </li>
                     </ul>
@@ -294,7 +334,10 @@ onMounted(async () => {
                     <section class="history-panel">
                         <header>
                             <div><h3>{{ historyGame.title }}</h3><p>最近 {{ history.length }} 个远端版本</p></div>
-                            <button class="btn btn-ghost btn-sm" @click="historyGame = null">返回</button>
+                            <div class="history-head-actions">
+                                <button class="btn btn-danger btn-sm" :disabled="running" @click="deleteRemote({ game: historyGame })">清空云端</button>
+                                <button class="btn btn-ghost btn-sm" @click="historyGame = null">返回</button>
+                            </div>
                         </header>
                         <div v-if="historyLoading" class="sync-loading"><span class="spinner" /></div>
                         <ol v-else class="history-list">
@@ -342,6 +385,7 @@ onMounted(async () => {
 .history-layer { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; background: rgba(0,0,0,.66); }
 .history-panel { width: min(560px, 100%); max-height: 80%; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--bg-1); box-shadow: var(--shadow-lg); }
 .history-panel > header { display: flex; justify-content: space-between; gap: 16px; padding: 16px; border-bottom: 1px solid var(--line); }
+.history-head-actions { display: flex; align-items: center; gap: 8px; }
 .history-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 58px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
 .history-list li > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .history-list strong { font-size: 12px; }

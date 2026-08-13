@@ -11,6 +11,8 @@ import { getSettings, setSetting } from '../shared/settings.js';
 import {
     clearWebDavConfig, getWebDavConfig, saveWebDavConfig, testWebDavConnection
 } from '../shared/webdav.js';
+import { showConfirm } from '../shared/dialog.js';
+import { toast } from '../shared/toast.js';
 
 const settings = ref(getSettings());
 const deviceName = ref(getDevice().name);
@@ -53,6 +55,7 @@ async function selectSyncProvider(provider) {
 function saveDeviceName() {
     deviceName.value = setDeviceName(deviceName.value).name;
     status.value = '设备名称已保存';
+    toast.success('设备名称已保存');
 }
 
 async function saveAndTestWebDav() {
@@ -60,22 +63,36 @@ async function saveAndTestWebDav() {
     testingWebDav.value = true;
     status.value = '正在测试 WebDAV 连接…';
     try {
-        await testWebDavConnection(webDav.value);
-        const config = saveWebDavConfig(webDav.value);
+        const testRes = await testWebDavConnection(webDav.value);
+        const config = saveWebDavConfig({
+            ...webDav.value,
+            supportsConditional: testRes?.supportsConditional !== false
+        });
         webDav.value = { ...config };
         hasSavedWebDav.value = true;
         settings.value = setSetting('saveSyncProvider', 'webdav');
-        status.value = 'WebDAV 连接成功，配置已保存';
+        const tip = testRes?.supportsConditional === false
+            ? 'WebDAV 连接成功（以兼容模式运行），配置已保存'
+            : 'WebDAV 连接成功，配置已保存';
+        status.value = tip;
+        toast.success(tip);
         await loadSyncStatus();
     } catch (err) {
         status.value = err.message || 'WebDAV 连接失败';
+        toast.error(err.message || 'WebDAV 连接失败');
     } finally {
         testingWebDav.value = false;
     }
 }
 
-function removeWebDav() {
-    if (!confirm('删除这台设备上的 WebDAV 配置？远端存档不会被删除。')) return;
+async function removeWebDav() {
+    const ok = await showConfirm({
+        title: '删除 WebDAV 配置',
+        message: '删除这台设备上的 WebDAV 配置？远端存档不会被删除。',
+        confirmText: '删除配置',
+        danger: true
+    });
+    if (!ok) return;
     clearWebDavConfig();
     hasSavedWebDav.value = false;
     webDav.value = {
@@ -86,6 +103,7 @@ function removeWebDav() {
         settings.value = setSetting('saveSyncProvider', 'site');
     }
     status.value = 'WebDAV 配置已删除，远端文件未改动';
+    toast.success('WebDAV 配置已删除');
     loadSyncStatus().catch((err) => {
         status.value = err.message || '读取同步状态失败';
     });

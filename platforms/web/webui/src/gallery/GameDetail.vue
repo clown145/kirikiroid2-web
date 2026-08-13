@@ -8,8 +8,10 @@ import DownloadLocationDialog from '../shared/DownloadLocationDialog.vue';
 import SyncPanel from '../shared/SyncPanel.vue';
 import { useFolderAccess } from '../shared/folderAccess.js';
 import { getSetting, requestDownloadHandoff, setSetting } from '../shared/settings.js';
+import { toast } from '../shared/toast.js';
 
-const gameId = decodeURIComponent(location.pathname.replace(/^\/game\/?/, ''));
+const cleanPath = location.pathname.replace(/\/+$/, '');
+const gameId = decodeURIComponent(cleanPath.replace(/^\/game\/?/, ''));
 const game = ref(null);
 const loading = ref(true);
 const loadError = ref('');
@@ -117,7 +119,7 @@ async function beginDownload() {
                         await waitForFolderAccess(true);
                     } else {
                         await refreshCache();
-                        alert('下载已停止：' + (error?.message || error || '未知错误'));
+                        toast.warn('下载已停止：' + (error?.message || error || '未知错误'));
                     }
                 });
             }
@@ -127,7 +129,7 @@ async function beginDownload() {
         if (isFolderPermissionError(err)) {
             void waitForFolderAccess(true);
         } else {
-            alert('无法开始下载：' + (err?.message || err));
+            toast.error('无法开始下载：' + (err?.message || err));
         }
     } finally {
         preparingDownload.value = false;
@@ -151,7 +153,7 @@ async function onDownload() {
         storage.value = await window.KrKr2Cache.storageInfo();
     } catch (err) {
         preparingDownload.value = false;
-        alert('无法读取下载位置：' + (err?.message || err));
+        toast.error('无法读取下载位置：' + (err?.message || err));
         return;
     }
     if (storage.value?.supported && storage.value.kind !== 'folder' &&
@@ -174,7 +176,7 @@ async function chooseFolder() {
         storage.value = await window.KrKr2Cache.storageInfo();
     } catch (err) {
         if (err?.name === 'AbortError') return;
-        alert('绑定文件夹失败：' + (err?.message || err));
+        toast.error('绑定文件夹失败：' + (err?.message || err));
         return;
     }
     pendingDownload.value = false;

@@ -302,6 +302,27 @@ async function restoreRevision(request, env, ctx, userId, gameId) {
     return json({ revision: revisionJson(revision) }, { status: 201 });
 }
 
+async function deleteGameSaves(env, ctx, userId, gameId) {
+    const revisions = await env.DB.prepare(
+        'SELECT id, object_key FROM save_revisions WHERE user_id = ? AND game_id = ?'
+    ).bind(userId, gameId).all();
+
+    await env.DB.batch([
+        env.DB.prepare('DELETE FROM save_heads WHERE user_id = ? AND game_id = ?').bind(userId, gameId),
+        env.DB.prepare('DELETE FROM save_revisions WHERE user_id = ? AND game_id = ?').bind(userId, gameId)
+    ]);
+
+    if (revisions.results?.length) {
+        ctx.waitUntil(Promise.all(revisions.results.map(async (row) => {
+            await removeRevisionObjectIfUnused(env, row.object_key);
+        })).catch((err) => {
+            console.error('[saves] delete object keys failed:', err?.stack || err);
+        }));
+    }
+
+    return json({ ok: true });
+}
+
 export async function handleSaves(request, env, ctx, segments) {
     if (!env.SAVES) return error(503, '云存档 R2 尚未绑定');
     const session = await getAccountSession(request, env);
@@ -312,6 +333,9 @@ export async function handleSaves(request, env, ctx, segments) {
 
     const gameId = cleanGameId(segments[0]);
     if (!gameId) return error(400, '无效的游戏标识');
+    if (!segments[1] && method === 'DELETE') {
+        return deleteGameSaves(env, ctx, session.user.id, gameId);
+    }
     if (segments[1] === 'history' && method === 'GET') {
         return listHistory(env, session.user.id, gameId);
     }

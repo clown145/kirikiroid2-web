@@ -15,6 +15,8 @@ import { attachSaveSpace } from './saveSpace.js';
 import EdgeToolbar from './EdgeToolbar.vue';
 import SaveSpacePanel from './SaveSpacePanel.vue';
 import LocalPicker from './LocalPicker.vue';
+import ToastContainer from '../shared/ToastContainer.vue';
+import ConfirmDialog from '../shared/ConfirmDialog.vue';
 
 const container = ref(null);
 const canvas = ref(null);
@@ -343,6 +345,8 @@ onUnmounted(() => {
         <SaveSpacePanel v-if="showSaves" @close="showSaves = false" />
 
         <FolderAccessGate :blocking="folderAccessBlocking" />
+        <ToastContainer />
+        <ConfirmDialog />
 
         <!-- 致命错误 -->
         <div v-if="errorInfo || fatal" class="modal-backdrop">
