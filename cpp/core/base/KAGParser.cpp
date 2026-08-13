@@ -147,33 +147,6 @@ namespace {
         }
     }
 
-    std::string TVPKAGTraceTagList(iTJSDispatch2 *dic) {
-        if(!dic)
-            return "<no-dic>";
-        tTJSVariant tagList;
-        try {
-            if(TJS_FAILED(dic->PropGet(0, TJS_W("taglist"), 0, &tagList,
-                                       dic)) ||
-               tagList.Type() == tvtVoid) {
-                return "<void>";
-            }
-            if(tagList.Type() != tvtObject) {
-                return "<non-object>";
-            }
-            tTJSVariant count;
-            tTJSVariantClosure clo = tagList.AsObjectClosureNoAddRef();
-            if(!clo.Object ||
-               TJS_FAILED(clo.PropGet(0, TJS_W("count"), 0, &count,
-                                      clo.ObjThis)) ||
-               count.Type() == tvtVoid) {
-                return "count=<void>";
-            }
-            return "count=" + std::to_string((tjs_int)count);
-        } catch(...) {
-            return "<exception>";
-        }
-    }
-
     bool TVPKAGTraceInterestingTag(const std::string &tag,
                                    const std::string &storage,
                                    const std::string &target,
@@ -268,11 +241,11 @@ namespace {
 
         if(auto logger = spdlog::get("core")) {
             logger->warn(
-                "KCHAIN stage={} parser={} parserStorage='{}' curLabel='{}' line={} pos={} tagLine={} tag='{}' storage='{}' target='{}' name='{}' call='{}' exp='{}' cond='{}' text='{}' taglist='{}' note='{}' stack='{}'",
+                "KCHAIN stage={} parser={} parserStorage='{}' curLabel='{}' line={} pos={} tagLine={} tag='{}' storage='{}' target='{}' name='{}' call='{}' exp='{}' cond='{}' text='{}' note='{}' stack='{}'",
                 stage ? stage : "", parser, parserStorageText,
                 TVPKAGTraceNarrow(curLabel), curLine, curPos, tagLine, tag,
-                storage, target, name, call, exp, cond, text,
-                TVPKAGTraceTagList(dic), noteText, TVPKAGTraceStack());
+                storage, target, name, call, exp, cond, text, noteText,
+                TVPKAGTraceStack());
         }
     }
 }
@@ -527,11 +500,6 @@ tTJSNI_KAGParser::tTJSNI_KAGParser() {
     DicClear = nullptr;
     DicAssign = nullptr;
     DicObj = nullptr;
-    TagListClear = nullptr;
-    TagListAdd = nullptr;
-    ArrayAssign = nullptr;
-    ArrayPush = nullptr;
-    TagList = nullptr;
     Macros = nullptr;
     RecordingMacro = false;
     DebugLevel = tkdlSimple;
@@ -543,9 +511,6 @@ tTJSNI_KAGParser::tTJSNI_KAGParser() {
     iTJSDispatch2 *dictclass;
     DicObj = TJSCreateDictionaryObject(&dictclass);
     Macros = TJSCreateDictionaryObject();
-    // taglist accumulator array (libkrkr2.so sub_561F3C keeps it at parser+24)
-    iTJSDispatch2 *arrayclass;
-    TagList = TJSCreateArrayObject(&arrayclass);
     try {
         // retrieve clear method from dictclass
         tTJSVariant val;
@@ -561,56 +526,18 @@ tTJSNI_KAGParser::tTJSNI_KAGParser() {
             TVPThrowInternalError;
         DicAssign = val.AsObject();
 
-        // retrieve clear/add methods from the Array class for TagList
-        er = arrayclass->PropGet(0, TJS_W("clear"), nullptr, &val, arrayclass);
-        if(TJS_FAILED(er))
-            TVPThrowInternalError;
-        TagListClear = val.AsObject();
-
-        er = arrayclass->PropGet(0, TJS_W("add"), nullptr, &val, arrayclass);
-        if(TJS_FAILED(er))
-            TVPThrowInternalError;
-        TagListAdd = val.AsObject();
-
-        // retrieve Array.assign method (libkrkr2.so qword_1AB3C10, sub_55A618):
-        // used to deep-copy the names-array into each MacroArgs element's
-        // second field (sub_569A18/sub_5698BC末参 clear=1)
-        er = arrayclass->PropGet(0, TJS_W("assign"), nullptr, &val, arrayclass);
-        if(TJS_FAILED(er))
-            TVPThrowInternalError;
-        ArrayAssign = val.AsObject();
-
-        // retrieve Array.push method (libkrkr2.so qword_1AB27E0):
-        // Store serializes each MacroArgs slot by pushing (key,value) pairs
-        // into a flat array (serializeMacroArg @0x54B1C8)
-        er = arrayclass->PropGet(0, TJS_W("push"), nullptr, &val, arrayclass);
-        if(TJS_FAILED(er))
-            TVPThrowInternalError;
-        ArrayPush = val.AsObject();
-
     } catch(...) {
         dictclass->Release();
-        arrayclass->Release();
         DicObj->Release();
-        TagList->Release();
         Macros->Release();
         if(DicClear)
             DicClear->Release();
         if(DicAssign)
             DicAssign->Release();
-        if(TagListClear)
-            TagListClear->Release();
-        if(TagListAdd)
-            TagListAdd->Release();
-        if(ArrayAssign)
-            ArrayAssign->Release();
-        if(ArrayPush)
-            ArrayPush->Release();
         throw;
     }
 
     dictclass->Release();
-    arrayclass->Release();
 }
 
 //---------------------------------------------------------------------------
@@ -636,16 +563,6 @@ void tTJSNI_KAGParser::Invalidate() {
         DicClear->Release();
     if(DicObj)
         DicObj->Release();
-    if(TagListAdd)
-        TagListAdd->Release();
-    if(TagListClear)
-        TagListClear->Release();
-    if(ArrayAssign)
-        ArrayAssign->Release();
-    if(ArrayPush)
-        ArrayPush->Release();
-    if(TagList)
-        TagList->Release();
     if(Macros)
         Macros->Release();
 
@@ -666,29 +583,17 @@ void tTJSNI_KAGParser::operator=(const tTJSNI_KAGParser &ref) {
         DicAssign->FuncCall(0, nullptr, nullptr, nullptr, 1, &psrc, Macros);
     }
 
-    // copy MacroArgs
-    // Aligned with libkrkr2.so MacroArg_copy @0x54ED08: 每个元素 first=new Dict
-    // + Dictionary.assign 深拷 ref.first，second=new Array + Array.assign(clear)
-    // 拷 ref.second。两个字段都拷贝。
+    // copy MacroArgs (one Dictionary per frame, as in the standard parser)
     {
         ClearMacroArgs();
 
         for(tjs_uint i = 0; i < ref.MacroArgStackDepth; i++) {
-            iTJSDispatch2 *first = TJSCreateDictionaryObject();
-            iTJSDispatch2 *second = TJSCreateArrayObject();
-
-            iTJSDispatch2 *isrc = ref.MacroArgs[i].first;
+            iTJSDispatch2 *dsp = TJSCreateDictionaryObject();
+            iTJSDispatch2 *isrc = ref.MacroArgs[i];
             tTJSVariant src(isrc, isrc);
             tTJSVariant *psrc = &src;
-            DicAssign->FuncCall(0, nullptr, nullptr, nullptr, 1, &psrc, first);
-
-            iTJSDispatch2 *isrc2 = ref.MacroArgs[i].second;
-            tTJSVariant src2(isrc2, isrc2);
-            tTJSVariant *psrc2 = &src2;
-            ArrayAssign->FuncCall(0, nullptr, nullptr, nullptr, 1, &psrc2,
-                                  second);
-
-            MacroArgs.push_back(std::make_pair(first, second));
+            DicAssign->FuncCall(0, nullptr, nullptr, nullptr, 1, &psrc, dsp);
+            MacroArgs.push_back(dsp);
         }
         MacroArgStackDepth = ref.MacroArgStackDepth;
     }
@@ -766,12 +671,7 @@ iTJSDispatch2 *tTJSNI_KAGParser::Store() {
         }
 
         // create and assign macro arguments
-        // Aligned with libkrkr2.so Store macroArgs @0x54A918 +
-        // serializeMacroArg @0x54B09C: 每个槽序列化成扁平数组
-        // [key0,val0,key1,val1,...]，其中 key 取自 second(names-array) 的有序
-        // 遍历（PropGetByNum），val = first(values-dict).PropGet(key)，由
-        // Array.push(key,value) 一次追加两元素。second 的顺序决定 save 内容/
-        // 顺序，故 names-array 被显式序列化。
+        // Standard KAGParser stores one Dictionary per stack slot.
         {
             iTJSDispatch2 *dsp;
             dsp = TJSCreateArrayObject();
@@ -781,38 +681,16 @@ iTJSDispatch2 *tTJSNI_KAGParser::Store() {
                          dic);
 
             for(tjs_uint i = 0; i < MacroArgStackDepth; i++) {
-                // serializeMacroArg(MacroArgs[i]) -> flat pair array
-                iTJSDispatch2 *flat;
-                flat = TJSCreateArrayObject();
-                tTJSVariant flatvar(flat, flat);
-                flat->Release();
-                dsp->PropSetByNum(TJS_MEMBERENSURE, i, &flatvar, dsp);
+                iTJSDispatch2 *slot = TJSCreateDictionaryObject();
+                tTJSVariant tmp(slot, slot);
+                slot->Release();
+                dsp->PropSetByNum(TJS_MEMBERENSURE, i, &tmp, dsp);
 
-                iTJSDispatch2 *first = MacroArgs[i].first;
-                iTJSDispatch2 *second = MacroArgs[i].second;
-
-                // count = second(names-array) 成员数 (sub_98B034 @0x54B0E8)
-                tTJSVariant cntval;
-                second->PropGet(0, TJS_W("count"), nullptr, &cntval, second);
-                tjs_int count = (tjs_int)cntval;
-
-                for(tjs_int idx = 0; idx < count; idx++) {
-                    // key = second.PropGetByNum(idx) (@0x54B128)
-                    tTJSVariant key;
-                    if(TJS_FAILED(
-                           second->PropGetByNum(0, idx, &key, second)))
-                        continue;
-
-                    // value = first.PropGet(key) (@0x54B144)
-                    tTJSVariant value;
-                    first->PropGet(0, ttstr(key).c_str(), nullptr, &value,
-                                   first);
-
-                    // flat.push(key, value) (@0x54B1C8): 一次追加两元素
-                    tTJSVariant *pp[2] = { &key, &value };
-                    ArrayPush->FuncCall(0, nullptr, nullptr, nullptr, 2, pp,
-                                        flat);
-                }
+                iTJSDispatch2 *srcobj = MacroArgs[i];
+                tTJSVariant src(srcobj, srcobj);
+                tTJSVariant *psrc = &src;
+                DicAssign->FuncCall(0, nullptr, nullptr, nullptr, 1, &psrc,
+                                    slot);
             }
         }
 
@@ -1060,41 +938,16 @@ void tTJSNI_KAGParser::Restore(iTJSDispatch2 *dic) {
             if(val.Type() != tvtVoid)
                 MacroArgStackDepth = (tjs_uint)(tjs_int)val;
 
-            // Aligned with libkrkr2.so Restore macroArgs @0x54BCA0 +
-            // MacroArg_construct_from_saved @0x54EFDC + MacroArg_addPair
-            // @0x54F120: 每个保存项是扁平 [key0,val0,key1,val1,...] 数组；为它
-            // 新建 {first=Dict, second=Array}，对每对 (i,i+1)：first.PropSet
-            // (key,value) + second.push(key)。names-array(second) 由保存的 key
-            // 序列重填，非空。
+            // Each saved item is a Dictionary copied into one macro frame.
             for(tjs_int i = 0; i < count; i++) {
-                iTJSDispatch2 *first = TJSCreateDictionaryObject();
-                iTJSDispatch2 *second = TJSCreateArrayObject();
+                iTJSDispatch2 *dsp = TJSCreateDictionaryObject();
 
-                // v = saved flat pair array at index i
+                // v = saved dictionary at index i
                 clo.PropGetByNum(0, i, &v, nullptr);
-                tTJSVariantClosure flat = v.AsObjectClosureNoAddRef();
-
-                // pair count = flat array 元素数 (sub_98B034 @0x54F00C)
-                tTJSVariant flatcnt;
-                flat.PropGet(0, TJS_W("count"), nullptr, &flatcnt, nullptr);
-                tjs_int flatlen = (tjs_int)flatcnt;
-
-                for(tjs_int j = 0; j + 1 < flatlen; j += 2) {
-                    tTJSVariant key;
-                    tTJSVariant value;
-                    flat.PropGetByNum(0, j, &key, nullptr);
-                    flat.PropGetByNum(0, j + 1, &value, nullptr);
-
-                    // first.PropSet(key, value) (@0x54F120 addPair)
-                    first->PropSetByVS(TJS_MEMBERENSURE,
-                                       key.AsStringNoAddRef(), &value, first);
-                    // second.push(key)
-                    tTJSVariant *pk[1] = { &key };
-                    ArrayPush->FuncCall(0, nullptr, nullptr, nullptr, 1, pk,
-                                        second);
-                }
-
-                MacroArgs.push_back(std::make_pair(first, second));
+                tTJSVariant *psrc = &v;
+                DicAssign->FuncCall(0, nullptr, nullptr, nullptr, 1, &psrc,
+                                    dsp);
+                MacroArgs.push_back(dsp);
             }
         }
 
@@ -1531,43 +1384,23 @@ bool tTJSNI_KAGParser::SkipCommentOrLabel() {
 }
 
 //---------------------------------------------------------------------------
-void tTJSNI_KAGParser::PushMacroArgs(iTJSDispatch2 *values,
-                                    iTJSDispatch2 *names) {
-    // Aligned with libkrkr2.so sub_561F3C PushMacroArgs inline @0x5666c0
-    // (callee sub_569A18 @0x569A18 新建 / sub_5698BC @0x5698BC 复用).
-    // 每个槽是 {first=values-dict, second=names-array} 配对；push 的源是
-    // {DicObj@parser+16, TagList@parser+24}。size>depth 复用上一轮残留的
-    // dict/array 对象（直接 assign 覆盖），否则新建 dict/array 后 push_back。
-    iTJSDispatch2 *first;
-    iTJSDispatch2 *second;
+void tTJSNI_KAGParser::PushMacroArgs(iTJSDispatch2 *args) {
+    // Standard libkrkr2.so sub_A2097C @0xA2097C: one dictionary per
+    // macro frame; reuse a spare slot when the logical depth decreases.
+    iTJSDispatch2 *dsp;
     if(MacroArgs.size() > MacroArgStackDepth) {
-        // reuse slot[MacroArgStackDepth] (sub_5698BC)
-        first = MacroArgs[MacroArgStackDepth].first;
-        second = MacroArgs[MacroArgStackDepth].second;
+        dsp = MacroArgs[MacroArgStackDepth];
     } else {
         if(MacroArgStackDepth > MacroArgs.size())
             TVPThrowInternalError;
-        // new element (sub_569A18): first=new Dict, second=new Array
-        first = TJSCreateDictionaryObject();
-        second = TJSCreateArrayObject();
-        MacroArgs.push_back(std::make_pair(first, second));
+        dsp = TJSCreateDictionaryObject();
+        MacroArgs.push_back(dsp);
     }
     MacroArgStackDepth++;
 
-    // deep-copy values(DicObj) -> first via Dictionary.assign (qword_1AB3C00)
-    {
-        tTJSVariant src(values, values);
-        tTJSVariant *psrc = &src;
-        DicAssign->FuncCall(0, nullptr, nullptr, nullptr, 1, &psrc, first);
-    }
-
-    // deep-copy names(TagList) -> second via Array.assign with clear=1
-    // (qword_1AB3C10): sub_569A18/sub_5698BC 末参 1 = clear before assign
-    {
-        tTJSVariant src(names, names);
-        tTJSVariant *psrc = &src;
-        ArrayAssign->FuncCall(0, nullptr, nullptr, nullptr, 1, &psrc, second);
-    }
+    tTJSVariant src(args, args);
+    tTJSVariant *psrc = &src;
+    DicAssign->FuncCall(0, nullptr, nullptr, nullptr, 1, &psrc, dsp);
 }
 
 //---------------------------------------------------------------------------
@@ -1579,12 +1412,8 @@ void tTJSNI_KAGParser::PopMacroArgs() {
 
 //---------------------------------------------------------------------------
 void tTJSNI_KAGParser::ClearMacroArgs() {
-    // Aligned with libkrkr2.so ClearMacroArgs inline @0x55C4AC (in clear
-    // sub_55C414): 每个 16B 元素对 first 与 second 双 Release（vtable+8），
-    // 然后逻辑清空、depth=0。
     for(auto &MacroArg : MacroArgs) {
-        MacroArg.first->Release();
-        MacroArg.second->Release();
+        MacroArg->Release();
     }
     MacroArgs.clear();
     MacroArgStackDepth = 0;
@@ -1733,32 +1562,6 @@ void tTJSNI_KAGParser::ClearCallStack() {
 }
 
 //---------------------------------------------------------------------------
-// taglist accumulator helpers (libkrkr2.so sub_561F3C @0x561F3C)
-//   libkrkr2.so keeps an Array at parser+24 that is cleared together with
-//   DicObj at the top of each parse loop (clear @qword_1AB3C08), Array.add's
-//   (@qword_1AB3C18) every member name stored into DicObj, and is finally
-//   written as DicObj.taglist via sub_568F88 @0x568F88 right before the tag
-//   dictionary is returned. KAGEnvironment.getCommandTarget gates its
-//   env-object path on elm.taglist.count > 1.
-void tTJSNI_KAGParser::TagListClearItems() {
-    TagListClear->FuncCall(0, nullptr, nullptr, nullptr, 0, nullptr, TagList);
-}
-
-void tTJSNI_KAGParser::TagListAddName(const ttstr &name) {
-    tTJSVariant nameval(name);
-    tTJSVariant *args[1] = { &nameval };
-    TagListAdd->FuncCall(0, nullptr, nullptr, nullptr, 1, args, TagList);
-}
-
-void tTJSNI_KAGParser::AttachTagList() {
-    static ttstr __taglist_name(TJSMapGlobalStringMap(TJS_W("taglist")));
-    tTJSVariant tlval(TagList, TagList);
-    DicObj->PropSetByVS(TJS_MEMBERENSURE,
-                        __taglist_name.AsVariantStringNoAddRef(), &tlval,
-                        DicObj);
-}
-
-//---------------------------------------------------------------------------
 iTJSDispatch2 *tTJSNI_KAGParser::_GetNextTag() {
 // get next tag and return information dictionary object.
 // return nullptr if the tag not found.
@@ -1792,7 +1595,6 @@ parse_start:
     while(true) {
         DicClear->FuncCall(0, nullptr, nullptr, nullptr, 0, nullptr, DicObj);
         // clear dictionary object
-        TagListClearItems(); // libkrkr2.so clears parser+24 alongside DicObj
 
         if(Interrupted) {
             // interrupt current parsing
@@ -1801,9 +1603,7 @@ parse_start:
             DicObj->PropSetByVS(TJS_MEMBERENSURE,
                                 __tag_name.AsVariantStringNoAddRef(), &r_val,
                                 DicObj);
-            TagListAddName(__tag_name);
             Interrupted = false;
-            AttachTagList();
             DicObj->AddRef();
             TVPKAGTraceTag("kag.tag.return", this, StorageName, CurLabel,
                            CurLine, CurPos, TagLine, DicObj, "interrupt");
@@ -1845,15 +1645,12 @@ parse_start:
                 DicObj->PropSetByVS(TJS_MEMBERENSURE,
                                     __eol_name.AsVariantStringNoAddRef(),
                                     &true_val, DicObj);
-                TagListAddName(__tag_name);
-                TagListAddName(__eol_name);
                 if(RecordingMacro)
                     RecordingMacroStr += TJS_W("[r eol=true]");
                 CurLine++;
                 CurPos = 0;
                 LineBufferUsing = false;
                 if(!RecordingMacro && ExcludeLevel == -1) {
-                    AttachTagList();
                     DicObj->AddRef();
                     TVPKAGTraceTag("kag.tag.return", this, StorageName,
                                    CurLabel, CurLine, CurPos, TagLine, DicObj,
@@ -1897,9 +1694,6 @@ parse_start:
                     DicObj->PropSetByVS(TJS_MEMBERENSURE,
                                         text_name.AsVariantStringNoAddRef(),
                                         &ch_val, DicObj);
-                    TagListAddName(__tag_name);
-                    TagListAddName(text_name);
-
                     if(RecordingMacro) {
                         if(ch == TJS_W('['))
                             RecordingMacroStr += TJS_W("[[");
@@ -1912,7 +1706,6 @@ parse_start:
                     DicObj->PropSetByVS(TJS_MEMBERENSURE,
                                         __tag_name.AsVariantStringNoAddRef(),
                                         &r_val, DicObj);
-                    TagListAddName(__tag_name);
                     if(RecordingMacro)
                         RecordingMacroStr += TJS_W("[r]");
                 }
@@ -1922,7 +1715,6 @@ parse_start:
                 CurPos++;
 
                 if(!RecordingMacro && ExcludeLevel == -1) {
-                    AttachTagList();
                     DicObj->AddRef();
                     TVPKAGTraceTag("kag.tag.return", this, StorageName,
                                    CurLabel, CurLine, CurPos, TagLine, DicObj,
@@ -1965,7 +1757,6 @@ parse_start:
             DicObj->PropSetByVS(TJS_MEMBERENSURE,
                                 __tag_name.AsVariantStringNoAddRef(), &tag_val,
                                 DicObj);
-            TagListAddName(__tag_name);
         }
 
         // check special control tags
@@ -2099,7 +1890,6 @@ parse_start:
                     TVP_KAG_STEP_NEXT;
 
                     if(condition && ExcludeLevel == -1) {
-                        AttachTagList(); // sub_568F88: DicObj.taglist = TagList
                         DicObj->AddRef();
                         TVPKAGTraceTag("kag.tag.return", this, StorageName,
                                        CurLabel, CurLine, CurPos, TagLine,
@@ -2314,10 +2104,9 @@ parse_start:
 
                         LineBufferUsing = true;
 
-                        // push macro arguments (libkrkr2.so sub_561F3C
-                        // @0x5666c0 push 源 = {DicObj@+16, TagList@+24})
+                        // push macro arguments (libkrkr2.so sub_A2097C)
                         if(ismacro)
-                            PushMacroArgs(DicObj, TagList);
+                            PushMacroArgs(DicObj);
 
                         break;
                     } else if(tagkind == tag_jump) {
@@ -2474,52 +2263,25 @@ parse_start:
             if(CurLineStr[CurPos] == TJS_W('*')) {
                 // macro entity all
                 if(!RecordingMacro) {
-                    // Aligned with libkrkr2.so sub_561F3C '*' branch @0x564080:
-                    // 遍历 element[depth-1].second (names-array) 的有序成员，
-                    // 用 PropGetByNum(idx) 取每个属性名 key，跳过 "tagname"，
-                    // 其余用 key 从 .first (values-dict) PropGet 取 value 后
-                    // PropSetByVS 进 DicObj、Array.add 进 TagList。这保留宏参数
-                    // 的源码顺序（不依赖 dict 的 hash 枚举序），并使 elm.taglist
-                    // 与转发参数同步（KAGEnvironment.getCommandTarget 门控
-                    // taglist.count>1）。当前标签自身的 tagname 在属性循环前已存，
-                    // 跳过 names 里的 "tagname" 项避免被覆盖。
-                    if(MacroArgStackDepth != 0) {
-                        iTJSDispatch2 *values =
-                            MacroArgs[MacroArgStackDepth - 1].first;
-                        iTJSDispatch2 *names =
-                            MacroArgs[MacroArgStackDepth - 1].second;
+                    // Standard libkrkr2.so sub_A214A0 @0xA214A0 copies the
+                    // complete current macro dictionary.  It deliberately
+                    // does not enumerate a separate names array, so keys
+                    // assigned dynamically through mp/macroParams survive.
+                    iTJSDispatch2 *args = GetMacroTopNoAddRef();
+                    if(args) {
+                        tTJSVariant src(args, args);
+                        tTJSVariant *psrc = &src;
+                        DicAssign->FuncCall(0, nullptr, nullptr, nullptr, 1,
+                                            &psrc, DicObj);
 
-                        // count = names-array 成员数 (sub_98B034 @0x564096)
-                        tTJSVariant cntval;
-                        names->PropGet(0, TJS_W("count"), nullptr, &cntval,
-                                       names);
-                        tjs_int count = (tjs_int)cntval;
-
-                        for(tjs_int idx = 0; idx < count; idx++) {
-                            // key = names.PropGetByNum(idx) (@0x5640b0)
-                            tTJSVariant nameval;
-                            if(TJS_FAILED(names->PropGetByNum(
-                                   0, idx, &nameval, names)))
-                                continue;
-                            ttstr name(nameval);
-
-                            // skip "tagname" (@0x5641a8 wcscmp L"tagname")
-                            if(name == TJS_W("tagname"))
-                                continue;
-
-                            // value = values.PropGet(key) (@0x5640cc)
-                            tTJSVariant value;
-                            values->PropGet(0, name.c_str(), nullptr, &value,
-                                            values);
-
-                            // DicObj.PropSetByVS(MEMBERENSURE,key,value)
-                            // (@0x564208，flag=512 单 TJS_MEMBERENSURE，不带
-                            // IGNOREPROP) + TagList.add(key) (@0x564280)
-                            DicObj->PropSetByVS(
-                                TJS_MEMBERENSURE,
-                                nameval.AsStringNoAddRef(), &value, DicObj);
-                            TagListAddName(name);
-                        }
+                        // sub_A214A0 @0xA214A0 restores the current tag name
+                        // after assigning the macro dictionary; the macro's
+                        // own tagname must not replace the enclosing tag.
+                        tTJSVariant tag_val(tagname);
+                        DicObj->PropSetByVS(
+                            TJS_MEMBERENSURE,
+                            __tag_name.AsVariantStringNoAddRef(), &tag_val,
+                            DicObj);
                     }
                 }
 
@@ -2680,7 +2442,6 @@ parse_start:
                 DicObj->PropSetByVS(TJS_MEMBERENSURE,
                                     attribname.AsVariantStringNoAddRef(),
                                     &ValueVariant, DicObj);
-                TagListAddName(attribname); // libkrkr2.so sub_561F3C @0x564280
             }
         }
     }
@@ -2693,12 +2454,11 @@ iTJSDispatch2 *tTJSNI_KAGParser::GetNextTag() { return _GetNextTag(); }
 
 //---------------------------------------------------------------------------
 iTJSDispatch2 *tTJSNI_KAGParser::GetMacroTopNoAddRef() const {
-    // Aligned with libkrkr2.so GetMacroTopNoAddRef inline @0x55FAEC/@0x55FBF4:
-    // depth==0 -> null，否则返回 element[depth-1].first (偏移 +0 = values-dict)。
+    // Standard getter returns the current dictionary slot.
     if(MacroArgStackDepth == 0)
         return nullptr;
 
-    return MacroArgs[MacroArgStackDepth - 1].first;
+    return MacroArgs[MacroArgStackDepth - 1];
 }
 //---------------------------------------------------------------------------
 

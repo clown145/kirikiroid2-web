@@ -37,6 +37,12 @@ set(APP_NAME krkr2)
 
 project(${APP_NAME})
 
+# Emscripten 6 only predefines __EMSCRIPTEN__, while cocos2d-x 3.17.2 and
+# existing Web platform code still use the legacy EMSCRIPTEN feature macro.
+if(EMSCRIPTEN)
+    add_compile_definitions(EMSCRIPTEN)
+endif()
+
 option(ENABLE_TESTS "enable tests execute build(exclude android)" ON)
 option(BUILD_TOOLS "build tools execute build(exclude android ios)" ON)
 option(KRKR2_WEB_DEBUG_ENABLE_ASAN "enable AddressSanitizer in Web Debug builds" ON)
@@ -129,6 +135,11 @@ elseif(WEB)
         "SHELL:-s MAX_WEBGL_VERSION=2"
         "SHELL:-s FULL_ES2=1"
         "SHELL:-s ALLOW_MEMORY_GROWTH=1"
+        # Emscripten 6 在处理 INCOMING_MODULE_JS_API 时，-pthread 隐含的
+        # IMPORTED_MEMORY 尚未生效，导致前端提供 Module.wasmMemory 时启动即 abort。
+        # 显式设置后 glue 会保留 wasmMemory/INITIAL_MEMORY 两个标准入口；内存本来
+        # 就因 pthread 构建而由 JS 导入，因此不会改变 wasm 的内存模型。
+        "SHELL:-s IMPORTED_MEMORY=1"
         # 见上方 KRKR2_WEB_INITIAL_MEMORY 注释（ASan 1GB / 非 ASan 64MB）。
         "SHELL:-s INITIAL_MEMORY=${KRKR2_WEB_INITIAL_MEMORY}"
         "SHELL:-s STACK_SIZE=2097152"

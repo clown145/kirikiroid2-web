@@ -14,8 +14,10 @@
 #
 # ASan 的影子内存（约 INITIAL_MEMORY/8）+ redzone 会把 wasm 声明的 min 顶到远高于
 # 链接参数 -s INITIAL_MEMORY 的值（实测 link 1GB → min ≈ 1.29GB），且随代码体积变化，
-# 配置期无法预测。emscripten 把最终值烘焙进 index.js：
+# 配置期无法预测。emscripten 把最终值烘焙进 index.js。旧版输出：
 #   var INITIAL_MEMORY = Module["INITIAL_MEMORY"] || <N>;
+# Emscripten 6 输出：
+#   var INITIAL_MEMORY = <N>;
 # 这里读出该权威 <N> 写进 build-config.js，使 shell 提供的 initial 恒等于
 # wasm 声明的 min（over-allocation 也合法，但精确相等最省内存）。
 #
@@ -27,15 +29,21 @@
 #   LOCAL_ZIP_PICKER TRUE=默认显示本地 ZIP 选择按钮
 
 file(READ "${JS}" _js)
-# 注意：-O3 release 的 index.js 经 JS minify，`||` 两侧空格会被去掉
-# （debug 为 `Module["INITIAL_MEMORY"] || N`，release 为 `Module["INITIAL_MEMORY"]||N`）；
-# 引号风格也可能因压缩在单/双引号间变化。故对 `[` 后引号、`]` 与 `||`、`||` 与数字
-# 之间的空白都放宽匹配，避免 release 构建在此 FATAL_ERROR。
+# 先匹配 Emscripten 5 及更早版本。-O3 release 会去掉 `||` 两侧空格，
+# 引号风格也可能因压缩在单/双引号间变化，故这些位置均放宽匹配。
 string(REGEX MATCH "Module\\[.INITIAL_MEMORY.\\][ \t]*\\|\\|[ \t]*([0-9]+)" _m "${_js}")
-if(NOT CMAKE_MATCH_1)
+set(_initial_memory "${CMAKE_MATCH_1}")
+
+# Emscripten 6 不再读取 Module.INITIAL_MEMORY，而是直接发出局部常量。
+# release 仍会保留 `var` 声明，但可能压缩掉 `=` 两侧空格。
+if(NOT _initial_memory)
+    string(REGEX MATCH "var[ \t]+INITIAL_MEMORY[ \t]*=[ \t]*([0-9]+)" _m "${_js}")
+    set(_initial_memory "${CMAKE_MATCH_1}")
+endif()
+
+if(NOT _initial_memory)
     message(FATAL_ERROR "gen_build_config: 在 ${JS} 中未找到烘焙的 INITIAL_MEMORY 默认值")
 endif()
-set(_initial_memory "${CMAKE_MATCH_1}")
 
 if(PWA)
     set(_pwa "true")

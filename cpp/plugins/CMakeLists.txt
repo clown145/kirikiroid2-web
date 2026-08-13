@@ -32,6 +32,10 @@ add_library(krkr2plugins_ncbind STATIC
     layerExRaster.cpp
     PackinOne.cpp
     DrawDeviceD3D.cpp
+    KAGParserEx/KAGParser.cpp
+    KAGParserEx/Plugin.cpp
+    KAGParserExb/KAGParser.cpp
+    KAGParserExb/Plugin.cpp
     textrender/TextRender.cpp
     extrans/Main.cpp
     extrans/wave.cpp

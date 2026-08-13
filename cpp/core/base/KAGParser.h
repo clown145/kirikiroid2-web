@@ -167,34 +167,11 @@ private:
     iTJSDispatch2 *DicAssign; // Dictionary
     iTJSDispatch2 *DicObj; // DictionaryObject
 
-    iTJSDispatch2 *TagListClear; // Array.clear method pointer (for TagList)
-    iTJSDispatch2 *TagListAdd; // Array.add method pointer (for TagList)
-    iTJSDispatch2 *TagList; // ordered list of the current tag's attribute
-                            // names (Array); attached as the "taglist" member
-                            // of DicObj. libkrkr2.so sub_561F3C @0x561F3C keeps
-                            // this array at parser+24, clears it together with
-                            // DicObj and Array.add's each stored member name
-
-    iTJSDispatch2 *ArrayAssign; // Array.assign method pointer
-                                // libkrkr2.so qword_1AB3C10 (取自 Array class
-                                // "assign")；用于把 names-array 深拷进 MacroArgs
-                                // 元素的 second 字段（sub_569A18/sub_5698BC）
-
-    iTJSDispatch2 *ArrayPush; // Array.push method pointer
-                              // libkrkr2.so qword_1AB27E0 (取自 Array class
-                              // "push")；Store 序列化每个 MacroArgs 槽时一次
-                              // push(key,value) 两元素到扁平 [k,v,k,v...] 数组
-                              // (serializeMacroArg @0x54B1C8)
-
     iTJSDispatch2 *Macros; // Macro Dictionary Object
 
-    // Macro arguments: libkrkr2.so 把每个宏参数槽存为 {values-dict, names-array}
-    // 配对的 16B 元素 vector（parser+56..+80, 元素 +0=first=values-dict,
-    // +8=second=names-array）。first 是宏实参字典，second 是按源码顺序记录的属性
-    // 名 Array（与 DicObj/TagList 并行）。sub_569A18/sub_5698BC 构造，
-    // GetMacroTopNoAddRef 返回 .first，'*' 转发分支按 .second 的 PropGetByNum
-    // 有序枚举。详见 analysis 与 sub_561F3C @0x5666c0/@0x564080。
-    std::vector<std::pair<iTJSDispatch2 *, iTJSDispatch2 *>> MacroArgs;
+    // Macro arguments: standard libkrkr2.so KAGParser stores one copied
+    // dictionary per active macro frame (sub_A2097C @0xA2097C).
+    std::vector<iTJSDispatch2 *> MacroArgs;
     tjs_uint MacroArgStackDepth;
     tjs_uint MacroArgStackBase;
 
@@ -296,9 +273,9 @@ public:
 private:
     bool SkipCommentOrLabel(); // skip comment or label and go to next line
 
-    // libkrkr2.so 的 push 源是 {DicObj@+16, TagList@+24}：values=DicObj、
-    // names=TagList。深拷 values→新元素 .first、names→.second。
-    void PushMacroArgs(iTJSDispatch2 *values, iTJSDispatch2 *names);
+    // Standard PushMacroArgs (libkrkr2.so sub_A2097C @0xA2097C): copy the
+    // current tag dictionary into one stack slot with Dictionary.assign.
+    void PushMacroArgs(iTJSDispatch2 *args);
 
 public:
     void PopMacroArgs();
@@ -333,10 +310,6 @@ public:
 
 private:
     iTJSDispatch2 *_GetNextTag();
-    // taglist accumulator helpers (libkrkr2.so sub_561F3C @0x561F3C)
-    void TagListClearItems(); // clear TagList (qword_1AB3C08 clear)
-    void TagListAddName(const ttstr &name); // Array.add (qword_1AB3C18)
-    void AttachTagList(); // DicObj.taglist = TagList (sub_568F88 @0x568F88)
 
 public:
     iTJSDispatch2 *GetNextTag();
