@@ -230,7 +230,7 @@ try {
             .find((button) => button.textContent.includes('本地缓存'))?.click();
     });
     await locationPage.waitForSelector('.cache-prompt-reset');
-    await locationPage.click('.cache-prompt-reset');
+    await locationPage.evaluate(() => document.querySelector('.cache-prompt-reset')?.click());
     ok(await locationPage.evaluate(() =>
         JSON.parse(localStorage.getItem('krkr2-settings') || '{}').downloadFolderPrompt === true),
         '本地缓存面板可以重新开启下载位置提示');
@@ -239,7 +239,8 @@ try {
         '重新开启后缓存面板立即更新');
 
     await locationPage.goto(BASE + '/game/location-test', { waitUntil: 'networkidle2' });
-    await locationPage.click('.detail-download');
+    await locationPage.waitForSelector('.detail-download');
+    await locationPage.evaluate(() => document.querySelector('.detail-download')?.click());
     await locationPage.waitForSelector('.download-location-dialog');
     ok(true, '游戏详情的完整下载使用同一份位置建议');
 
