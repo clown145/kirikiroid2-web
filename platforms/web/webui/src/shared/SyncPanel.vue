@@ -38,7 +38,7 @@ const backend = ref(null);
 const returnTo = location.pathname + location.search;
 const singleGame = computed(() => props.games.length === 1 ? props.games[0] : null);
 const needsLogin = computed(() => !!backend.value?.requiresAccount && !props.account);
-const canSync = computed(() => !!backend.value && !needsLogin.value);
+const canSync = computed(() => !!backend.value && !needsLogin.value && !loading.value);
 const remoteName = computed(() => backend.value?.kind === 'webdav' ? 'WebDAV' : '站点云端');
 
 const relevantRows = computed(() => rows.value.filter((row) => row.local || row.remote));
@@ -294,7 +294,7 @@ onMounted(async () => {
                             <span v-if="cloudUsage">站点云端 {{ fmtBytes(cloudUsage.bytes) }} / {{ fmtBytes(cloudUsage.limit) }}</span>
                             <span v-else-if="backend.kind === 'webdav'">存档直接传输到你的 WebDAV</span>
                         </div>
-                        <button class="btn btn-primary" :disabled="running" @click="runAll">
+                        <button class="btn btn-primary" :disabled="running || loading" @click="runAll">
                             <span v-if="running" class="spinner" />
                             {{ running ? '同步中' : (singleGame ? '同步这个游戏' : '同步全部存档') }}
                         </button>
