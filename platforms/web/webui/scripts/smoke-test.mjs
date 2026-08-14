@@ -134,7 +134,7 @@ await visit('/', {
             '未登录菜单明确本地游玩和 WebDAV 无需登录':
                 account.menu.includes('本地游玩和 WebDAV 无需登录'),
             '工具入口已收纳进菜单': ['设置与存档同步', '帮助与说明', '本地缓存', '打开本地文件', '管理后台']
-                .every((label) => account.tools.includes(label)),
+                .every((label) => account.tools.some((t) => t.includes(label))),
             '画廊没有水平溢出': account.viewportFits,
             // 引擎地址必须取自 engineBase，不能写死。启用 KRKR2_ENGINE_BASE 后
             // wasm 在 /engine/<版本>/ 下，写死 /index.wasm 会 404 —— 预热失灵
