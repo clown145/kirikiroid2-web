@@ -22,12 +22,14 @@ const ENGINE_FILES = ['index.js', 'index.wasm', 'assets.zip',
 //
 // 这是关键：正因为 /engine/* 同源，Cloudflare 的构建环境（编译不了 C++）
 // 完全不需要任何引擎产物在场，只要知道版本号这一个字符串即可。
-// build-config.js 的 <script> 地址由下面的 transformIndexHtml 改写。
-const ENGINE_BASE = process.env.KRKR2_ENGINE_BASE || '';
+const localEngineExists = existsSync(resolve(ENGINE_DIR, 'index.js'));
+const ENGINE_BASE = process.env.KRKR2_ENGINE_BASE !== undefined
+    ? process.env.KRKR2_ENGINE_BASE
+    : (localEngineExists ? '' : '/engine/');
 const REMOTE_FILES = ENGINE_BASE ? ENGINE_FILES : [];
 
 // 只在"不走 R2"时才需要本地引擎产物
-const hasEngine = ENGINE_BASE || existsSync(resolve(ENGINE_DIR, 'index.js'));
+const hasEngine = ENGINE_BASE || localEngineExists;
 
 if (!hasEngine) {
     console.warn(
