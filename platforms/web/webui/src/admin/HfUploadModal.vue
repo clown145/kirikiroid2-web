@@ -321,6 +321,22 @@ async function startUpload() {
                 item.progress = Math.round((loaded / item.size) * 100);
             });
 
+            // 告知 Hugging Face 校验已上传的 S3 对象
+            const verifyRes = await fetch('/api/admin/hf/verify-upload', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    repo: targetRepo.value.trim(),
+                    oid: item.sha256,
+                    size: item.size
+                })
+            });
+
+            if (!verifyRes.ok) {
+                const errData = await verifyRes.json().catch(() => ({}));
+                throw new Error(errData.error || `LFS 校验失败 (${verifyRes.status})`);
+            }
+
             item.status = 'done';
             item.progress = 100;
         }
@@ -333,7 +349,7 @@ async function startUpload() {
             ...nonManifestFiles.map((f) => ({
                 operation: 'lfsFile',
                 path: `${slug}/${f.name}`,
-                content: f.sha256,
+                oid: f.sha256,
                 size: f.size
             })),
             // manifest.json 以普通文件提交
