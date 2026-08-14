@@ -68,7 +68,7 @@ try {
     await clickButton(page, '管理同步');
     await page.waitForSelector('.sync-panel');
     await page.waitForFunction(() => !document.querySelector('.sync-loading'));
-    await page.click('.sync-toolbar button.btn-primary');
+    await page.evaluate(() => document.querySelector('.sync-toolbar button.btn-primary')?.click());
     await page.waitForFunction(() =>
         document.body.innerText.includes('完成：') ||
         document.body.innerText.includes('已同步') ||
@@ -77,7 +77,8 @@ try {
     );
     ok(await page.evaluate(() => document.body.innerText.includes('已同步')), 'UI 完成手动上传');
 
-    await clickButton(page, '关闭');
+    await page.evaluate(() => document.querySelector('.sync-head button')?.click());
+    await page.waitForSelector('.sync-panel', { hidden: true });
     await page.evaluate(async (id) => {
         await window.KrKr2IDB.replaceFiles('game_' + id, [], {
             dirty: false, baseRevision: null, contentHash: null
