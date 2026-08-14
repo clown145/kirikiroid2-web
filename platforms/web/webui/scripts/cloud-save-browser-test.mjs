@@ -66,8 +66,8 @@ try {
     }, gameId);
 
     await clickButton(page, '管理同步');
-    await page.waitForSelector('.sync-toolbar button');
-    await clickButton(page, '同步全部存档');
+    await page.waitForSelector('.sync-toolbar button.btn-primary');
+    await page.click('.sync-toolbar button.btn-primary');
     await page.waitForFunction(() =>
         document.body.innerText.includes('完成：') ||
         document.body.innerText.includes('已同步') ||
