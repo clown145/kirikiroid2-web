@@ -31,7 +31,8 @@ async function clickButton(page, text) {
 }
 
 sql(`
-  INSERT INTO users VALUES ('${userId}', '浏览器同步测试', '', ${now}, ${now}, ${now});
+  INSERT INTO users (id, display_name, avatar_url, created_at, updated_at, last_login_at)
+  VALUES ('${userId}', '浏览器同步测试', '', ${now}, ${now}, ${now});
   INSERT INTO user_sessions VALUES ('${tokenHash}', '${userId}', ${now}, ${now + 3600000}, ${now});
   INSERT INTO games VALUES ('${gameId}', '浏览器云存档测试', '', '', '', '', '[]', 0, 0, 1, ${now}, ${now});
 `);
