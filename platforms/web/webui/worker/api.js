@@ -114,8 +114,10 @@ async function handlePublicList(request, env, ctx) {
         { headers: { 'Cache-Control': `public, max-age=${PUBLIC_LIST_MAX_AGE}` } }
     );
 
-    if (!noCache && ctx?.waitUntil) {
+    if (ctx?.waitUntil) {
         ctx.waitUntil(cache.put(cacheKey, response.clone()));
+    } else {
+        await cache.put(cacheKey, response.clone()).catch(() => {});
     }
     return response;
 }
