@@ -161,7 +161,6 @@ try {
         }
     });
     await locationPage.evaluateOnNewDocument(() => {
-        try { localStorage.clear(); } catch {}
         window.showDirectoryPicker = async () => { throw new DOMException('cancelled', 'AbortError'); };
         let cache;
         window.__downloadStarts = 0;
@@ -317,7 +316,7 @@ try {
             }
         });
     });
-    await deniedPage.goto(BASE + '/', { waitUntil: 'networkidle2' });
+    await deniedPage.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
     await deniedPage.waitForSelector('.folder-permission-dialog');
     const galleryPrompt = await deniedPage.$eval(
         '.folder-permission-dialog', (el) => el.textContent.replace(/\s+/g, ' ').trim());
@@ -350,7 +349,7 @@ try {
             request.continue();
         }
     });
-    await deniedPage.goto(BASE + '/game/permission-test', { waitUntil: 'networkidle2' });
+    await deniedPage.goto(BASE + '/game/permission-test', { waitUntil: 'domcontentloaded' });
     await deniedPage.waitForSelector('.folder-permission-dialog');
     ok(true, '直接进入游戏详情也立即提示恢复文件夹访问');
     await deniedPage.evaluate(() => {
@@ -362,7 +361,7 @@ try {
         '详情页暂时忽略后账号菜单仍显示权限异常标记');
 
     for (const path of ['/settings', '/help', '/admin']) {
-        await deniedPage.goto(BASE + path, { waitUntil: 'networkidle2' });
+        await deniedPage.goto(BASE + path, { waitUntil: 'domcontentloaded' });
         await deniedPage.waitForSelector('.folder-permission-dialog');
         const actions = await deniedPage.$$eval(
             '.folder-permission-actions button', (buttons) => buttons.map((button) => button.textContent.trim()));
@@ -425,7 +424,7 @@ try {
             }
         });
     });
-    await blockedPlayer.goto(BASE + '/play/permission-test', { waitUntil: 'networkidle2' });
+    await blockedPlayer.goto(BASE + '/play/permission-test', { waitUntil: 'domcontentloaded' });
     await blockedPlayer.waitForSelector('.folder-permission-dialog');
     const blockedState = await blockedPlayer.evaluate(() => ({
         boots: window.__engineBoots,
