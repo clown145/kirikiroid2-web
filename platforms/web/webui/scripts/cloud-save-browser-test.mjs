@@ -66,7 +66,8 @@ try {
     }, gameId);
 
     await clickButton(page, '管理同步');
-    await page.waitForSelector('.sync-row');
+    await page.waitForSelector('.sync-dialog');
+    await page.waitForFunction(() => !document.querySelector('.sync-loading'));
     await page.click('.sync-toolbar button.btn-primary');
     await page.waitForFunction(() =>
         document.body.innerText.includes('完成：') ||
@@ -84,7 +85,8 @@ try {
     }, gameId);
 
     await clickButton(page, '管理同步');
-    await page.waitForSelector('.sync-row');
+    await page.waitForSelector('.sync-dialog');
+    await page.waitForFunction(() => !document.querySelector('.sync-loading'));
     await page.waitForFunction(() =>
         document.body.innerText.includes('仅站点云端') ||
         document.body.innerText.includes('仅WebDAV') ||

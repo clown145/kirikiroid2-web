@@ -107,10 +107,7 @@ export default {
             }
 
             // --- 其余交给静态资源 ---------------------------------------
-            const assetRequest = url.search
-                ? new Request(new URL(url.pathname, url.origin), request)
-                : request;
-            const asset = await env.ASSETS.fetch(assetRequest);
+            const asset = await env.ASSETS.fetch(request);
 
             // SPA 式回退：静态资源没命中且看起来是页面导航，回首页而不是裸 404
             if (asset.status === 404 && request.headers.get('Accept')?.includes('text/html')) {
