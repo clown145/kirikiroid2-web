@@ -2,6 +2,7 @@
 import { ref, computed, watch, onUnmounted } from 'vue';
 import { toast } from '../shared/toast.js';
 import { toPinyinSlug } from '../shared/pinyin.js';
+import { computeFileSha256 } from '../shared/sha256.js';
 
 const props = defineProps({
     show: { type: Boolean, default: false }
@@ -15,7 +16,7 @@ const step = ref('select');
 const targetRepo = ref('clown145/gal');
 const gameTitle = ref('');
 const gameSlug = ref('');
-const files = ref([]);          // [{ name, file, size, sha256, status, progress, exists, uploadAction }]
+const files = ref([]);          // [{ name, handle, file, size, sha256, status, progress, exists, uploadAction }]
 const hasExistingManifest = ref(false);
 const generatedManifest = ref(null);
 
@@ -31,6 +32,7 @@ const proxiedManifestUrl = ref('');
 const dirInput = ref(null);
 const isDragging = ref(false);
 
+let currentDirHandle = null;
 let speedTimer = null;
 let lastBytes = 0;
 let lastTime = Date.now();
@@ -56,10 +58,12 @@ async function onPickFolder() {
     if (typeof window.showDirectoryPicker === 'function') {
         try {
             const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+            currentDirHandle = dirHandle;
             await processDirectoryHandle(dirHandle);
         } catch (err) {
             if (err?.name !== 'AbortError') {
-                toast.error('读取文件夹失败: ' + err.message);
+                // 若 showDirectoryPicker 出错，降级触发普通文件 input
+                dirInput.value?.click();
             }
         }
     } else {
@@ -80,6 +84,7 @@ async function scanHandle(dirHandle, relativePath = '') {
             const file = await handle.getFile();
             list.push({
                 name: itemPath.replace(/\\/g, '/'),
+                handle: handle,
                 file: file,
                 size: file.size,
                 status: 'pending', // 'pending' | 'hashing' | 'uploading' | 'done' | 'dedup' | 'error'
@@ -153,14 +158,16 @@ function onDrop(e) {
     }
 }
 
-// --- 计算文件 SHA256 -------------------------------------------------
-
-async function computeSha256(file) {
-    const buffer = await file.arrayBuffer();
-    const hashBuf = await crypto.subtle.digest('SHA-256', buffer);
-    return Array.from(new Uint8Array(hashBuf))
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('');
+// --- 获取当前有效文件对象 --------------------------------------------
+async function getActiveFile(item) {
+    if (item.handle && typeof item.handle.getFile === 'function') {
+        try {
+            return await item.handle.getFile();
+        } catch {
+            return item.file;
+        }
+    }
+    return item.file;
 }
 
 // --- 上传逻辑 --------------------------------------------------------
@@ -241,6 +248,18 @@ async function startUpload() {
     startSpeedMonitor();
 
     try {
+        // 若支持权限检查，主动触发一次读取授权
+        if (currentDirHandle && typeof currentDirHandle.requestPermission === 'function') {
+            try {
+                const perm = await currentDirHandle.requestPermission({ mode: 'read' });
+                if (perm !== 'granted') {
+                    throw new Error('未获取到文件夹读取授权，请重新选择文件夹并允许访问');
+                }
+            } catch (pErr) {
+                if (pErr.message && pErr.message.includes('授权')) throw pErr;
+            }
+        }
+
         // 1. 准备/自动生成 manifest.json
         let manifestData = [];
         const nonManifestFiles = files.value.filter((f) => f.name.toLowerCase() !== 'manifest.json');
@@ -254,13 +273,14 @@ async function startUpload() {
 
         const manifestJsonStr = JSON.stringify(manifestData, null, 2);
 
-        // 2. 计算每个实体文件的 SHA-256
+        // 2. 计算每个实体文件的 SHA-256（采用流式分块读取，防止大文件爆内存）
         currentTaskMsg.value = '正在计算文件指纹与哈希 (SHA-256)...';
         for (let i = 0; i < nonManifestFiles.length; i++) {
             const item = nonManifestFiles[i];
             item.status = 'hashing';
             currentTaskMsg.value = `正在校验指纹 (${i + 1}/${nonManifestFiles.length}): ${item.name}`;
-            item.sha256 = await computeSha256(item.file);
+            const activeFile = await getActiveFile(item);
+            item.sha256 = await computeFileSha256(activeFile);
             item.status = 'pending';
         }
 
@@ -313,7 +333,9 @@ async function startUpload() {
 
             fileBytesTracker.set(item.name, 0);
 
-            await uploadToS3(meta.uploadAction, item.file, (loaded) => {
+            const activeFile = await getActiveFile(item);
+
+            await uploadToS3(meta.uploadAction, activeFile, (loaded) => {
                 const prev = fileBytesTracker.get(item.name) || 0;
                 const diff = loaded - prev;
                 fileBytesTracker.set(item.name, loaded);
@@ -465,6 +487,10 @@ onUnmounted(() => {
                         <p class="drop-hint">
                             {{ files.length ? `总大小 ${formatBytes(totalBytes)}，点击可更换文件夹` : '支持全套 .xp3 / 音视频资源与 manifest.json 自动识别' }}
                         </p>
+                        <div class="drop-fallback">
+                            <span class="fallback-hint">如遇系统权限弹窗异常，可点此</span>
+                            <button type="button" class="btn btn-ghost btn-sm fallback-btn" @click.stop="dirInput.click()">📂 备用文件选择器</button>
+                        </div>
                         <input
                             ref="dirInput"
                             type="file"
@@ -686,6 +712,29 @@ onUnmounted(() => {
     margin: 0;
     font-size: 0.85rem;
     color: #9494a0;
+}
+
+.drop-fallback {
+    margin-top: 14px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: #111116;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid #282833;
+}
+
+.fallback-hint {
+    font-size: 0.75rem;
+    color: #888898;
+}
+
+.fallback-btn {
+    font-size: 0.75rem;
+    padding: 2px 8px;
+    height: 26px;
+    color: #e0e0e0;
 }
 
 .config-card {
