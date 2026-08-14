@@ -6,6 +6,9 @@ import { json, error } from './headers.js';
 
 export const HF_LFS_BATCH_LIMIT = 100;
 export const HF_COMMIT_OPERATION_LIMIT = 10000;
+export const HF_MULTIPART_PART_LIMIT = 10000;
+
+const HF_COMPLETION_TIMEOUT_MS = 25000;
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const REPO_PART_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,95})$/;
@@ -83,6 +86,9 @@ export function signedUrlExpiry(value) {
         const cloudfrontExpiry = Number(url.searchParams.get('Expires')) * 1000;
         if (Number.isFinite(cloudfrontExpiry) && cloudfrontExpiry > 0) return cloudfrontExpiry;
 
+        const hubExpiry = Date.parse(url.searchParams.get('expiration') || '');
+        if (Number.isFinite(hubExpiry) && hubExpiry > 0) return hubExpiry;
+
         const signedAt = parseAmzDate(url.searchParams.get('X-Amz-Date'));
         const lifetime = Number(url.searchParams.get('X-Amz-Expires')) * 1000;
         if (signedAt > 0 && Number.isFinite(lifetime) && lifetime > 0) return signedAt + lifetime;
@@ -100,17 +106,34 @@ function safeHttpsUrl(value) {
     return url.href;
 }
 
+function safeMultipartCompletionUrl(value) {
+    let url;
+    try {
+        url = new URL(String(value || ''));
+    } catch {
+        throw new InputError('Hugging Face multipart 完成地址无效');
+    }
+
+    const requiredParams = ['uploadId', 'bucket', 'prefix', 'expiration', 'signature'];
+    if (url.origin !== 'https://huggingface.co' || url.pathname !== '/api/complete_multipart' ||
+        url.username || url.password || url.hash || url.href.length > 8192 ||
+        requiredParams.some((name) => !url.searchParams.get(name))) {
+        throw new InputError('Hugging Face multipart 完成地址无效');
+    }
+    return url.href;
+}
+
 /**
  * 只向浏览器返回完成上传所必需的预签名字段。HF action.header 中的其他头不透传。
  */
 export function sanitizeUploadAction(action, expectedSize) {
     if (!action || typeof action !== 'object') return null;
 
-    const href = safeHttpsUrl(action.href);
     const header = action.header && typeof action.header === 'object' ? action.header : {};
     const rawChunkSize = header.chunk_size;
 
     if (rawChunkSize !== undefined && rawChunkSize !== null && rawChunkSize !== '') {
+        const href = safeMultipartCompletionUrl(action.href);
         const chunkSize = Number(rawChunkSize);
         if (!Number.isSafeInteger(chunkSize) || chunkSize <= 0) {
             throw new InputError('Hugging Face multipart chunk_size 无效');
@@ -139,6 +162,7 @@ export function sanitizeUploadAction(action, expectedSize) {
         };
     }
 
+    const href = safeHttpsUrl(action.href);
     return {
         type: 'basic',
         href,
@@ -238,6 +262,30 @@ async function readJson(request) {
     }
 }
 
+function normalizeMultipartCompletion(body) {
+    const href = safeMultipartCompletionUrl(body?.href);
+    const oid = normalizeOid(body?.oid);
+    const rawParts = body?.parts;
+    if (!Array.isArray(rawParts) || rawParts.length === 0 || rawParts.length > HF_MULTIPART_PART_LIMIT) {
+        throw new InputError(`multipart parts 数量必须在 1 到 ${HF_MULTIPART_PART_LIMIT} 之间`);
+    }
+
+    const parts = rawParts.map((part) => {
+        const partNumber = Number(part?.partNumber);
+        const etag = typeof part?.etag === 'string' ? part.etag : '';
+        if (!Number.isSafeInteger(partNumber) || partNumber <= 0 ||
+            !etag || etag.length > 512 || /[\u0000-\u001f\u007f]/.test(etag)) {
+            throw new InputError('multipart partNumber/etag 无效');
+        }
+        return { partNumber, etag };
+    }).sort((a, b) => a.partNumber - b.partNumber);
+
+    if (parts.some((part, index) => part.partNumber !== index + 1)) {
+        throw new InputError('multipart parts 必须从 1 开始连续排列');
+    }
+    return { href, oid, parts };
+}
+
 function upstreamMessage(response, text, operation) {
     const detail = String(text || '').slice(0, 2000);
     return `${operation} (${response.status})${detail ? `: ${detail}` : ''}`;
@@ -301,6 +349,36 @@ async function handlePrepareUpload(request, env) {
         requestId: hfRes.headers.get('X-Request-Id') || '',
         objects: mapLfsBatchObjects(files, result.objects)
     });
+}
+
+async function handleCompleteMultipart(request) {
+    let completion;
+    try {
+        completion = normalizeMultipartCompletion(await readJson(request));
+    } catch (err) {
+        if (err instanceof InputError) return error(400, err.message);
+        throw err;
+    }
+
+    let hfRes;
+    try {
+        hfRes = await fetch(completion.href, {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/vnd.git-lfs+json',
+                'Content-Type': 'application/vnd.git-lfs+json'
+            },
+            body: JSON.stringify({ oid: completion.oid, parts: completion.parts }),
+            signal: AbortSignal.timeout(HF_COMPLETION_TIMEOUT_MS)
+        });
+    } catch (err) {
+        return error(502, `LFS multipart 合并请求失败: ${err.message}`);
+    }
+
+    if (!hfRes.ok) {
+        return error(hfRes.status, upstreamMessage(hfRes, await hfRes.text(), 'LFS multipart 合并失败'));
+    }
+    return json({ ok: true });
 }
 
 async function handleVerifyUpload(request, env) {
@@ -452,6 +530,7 @@ async function handleCommit(request, env) {
 export async function handleHfUploadApi(request, env, ctx, segments) {
     const [action] = segments;
     if (action === 'prepare-upload' && request.method === 'POST') return handlePrepareUpload(request, env);
+    if (action === 'complete-multipart' && request.method === 'POST') return handleCompleteMultipart(request);
     if (action === 'verify-upload' && request.method === 'POST') return handleVerifyUpload(request, env);
     if (action === 'commit' && request.method === 'POST') return handleCommit(request, env);
     return error(404, 'Unknown HF upload endpoint');

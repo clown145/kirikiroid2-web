@@ -122,9 +122,11 @@ export class UploadTaskPool {
         this.queue = [];
     }
 
-    run(task) {
+    run(task, { priority = false } = {}) {
         return new Promise((resolve, reject) => {
-            this.queue.push({ task, resolve, reject });
+            const entry = { task, resolve, reject };
+            if (priority) this.queue.unshift(entry);
+            else this.queue.push(entry);
             this.drain();
         });
     }
@@ -321,10 +323,19 @@ export function fetchWithUploadRetry(url, init = {}, {
     control = new UploadControl(),
     fetchFn = fetch,
     expiredStatuses = false,
+    requestTimeoutMs = 0,
     ...retryOptions
 } = {}) {
     return withUploadRetry(async () => {
         const controller = new AbortController();
+        let timedOut = false;
+        const timeoutMs = Number(requestTimeoutMs);
+        const timeoutId = Number.isFinite(timeoutMs) && timeoutMs > 0
+            ? setTimeout(() => {
+                timedOut = true;
+                controller.abort();
+            }, timeoutMs)
+            : null;
         const unregister = control.registerAborter(() => controller.abort());
         try {
             const response = await fetchFn(url, { ...init, signal: controller.signal });
@@ -334,13 +345,17 @@ export function fetchWithUploadRetry(url, init = {}, {
             if (control.cancelled) throw new UploadCancelledError();
             if (control.paused) throw new UploadPausedError();
             if (err?.name === 'AbortError') {
-                throw new UploadRequestError('网络请求被中止', { retryable: true });
+                const message = timedOut
+                    ? `请求 ${Math.ceil(timeoutMs / 1000)} 秒无响应，已自动重试`
+                    : '网络请求被中止';
+                throw new UploadRequestError(message, { retryable: true });
             }
             if (err instanceof TypeError) {
                 throw new UploadRequestError(`网络请求失败: ${err.message}`, { retryable: true });
             }
             throw err;
         } finally {
+            if (timeoutId) clearTimeout(timeoutId);
             unregister();
         }
     }, { control, ...retryOptions });
@@ -380,6 +395,10 @@ export async function uploadMultipartFile({
     onProgress,
     onWireBytes,
     onPartComplete,
+    onCompleting,
+    onCompletionRetry,
+    completionEndpoint = '/api/admin/hf/complete-multipart',
+    completionTimeoutMs = DEFAULT_STALL_TIMEOUT_MS,
     fetchFn,
     xhrFactory,
     stallTimeoutMs,
@@ -425,22 +444,21 @@ export async function uploadMultipartFile({
     const payload = createMultipartCompletionPayload(oid, resultParts);
     if (payload.parts.length !== parts.length) throw new Error('multipart 完成请求缺少 ETag');
 
-    await fetchWithUploadRetry(upload.href, {
+    await onCompleting?.();
+    await pool.run(() => fetchWithUploadRetry(completionEndpoint, {
         method: 'POST',
-        headers: {
-            'Accept': 'application/vnd.git-lfs+json',
-            'Content-Type': 'application/vnd.git-lfs+json'
-        },
-        body: JSON.stringify(payload)
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ href: upload.href, ...payload })
     }, {
         control,
         fetchFn,
         expiredStatuses: [400, 401, 403, 404, 409, 410],
+        requestTimeoutMs: completionTimeoutMs,
         maxAttempts,
         sleepFn,
         random,
-        onRetry
-    });
+        onRetry: onCompletionRetry || onRetry
+    }), { priority: true });
     onProgress?.(file.size, file.size);
     return { parts: resultParts, payload };
 }

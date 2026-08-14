@@ -526,9 +526,18 @@ async function uploadOneFile(item, initialMeta) {
                     onProgress: (loaded) => updateItemUploaded(item, loaded),
                     onWireBytes: recordWireBytes,
                     onRetry: retryNotice(item, '分片上传'),
+                    onCompletionRetry: retryNotice(item, '分片合并'),
                     onPartComplete: async (partNumber, etag) => {
                         item.parts = { ...item.parts, [partNumber]: etag };
                         await persist(() => saveCompletedPart(sessionId, item.name, partNumber, etag));
+                    },
+                    onCompleting: async () => {
+                        item.status = 'completing';
+                        item.error = '';
+                        currentTaskMsg.value = `正在合并分片：${item.name}`;
+                        await persist(() => patchUploadFile(sessionId, item.name, {
+                            status: 'completing', parts: item.parts, retryCount: item.retryCount
+                        }));
                     }
                 });
                 item.parts = result.parts;
@@ -1087,6 +1096,7 @@ onUnmounted(() => {
                                     <span v-else-if="file.status === 'uploading'" class="badge badge-uploading">
                                         {{ file.upload?.type === 'multipart' ? '分片' : '上传' }} {{ file.progress }}%
                                     </span>
+                                    <span v-else-if="file.status === 'completing'" class="badge badge-verify">合并分片</span>
                                     <span v-else-if="file.status === 'verifying'" class="badge badge-verify">校验</span>
                                     <span v-else-if="file.status === 'dedup'" class="badge badge-dedup">秒传</span>
                                     <span v-else-if="file.status === 'done'" class="badge badge-done">完成</span>

@@ -11,6 +11,7 @@ import {
     UploadControl,
     UploadTaskPool,
     createMultipartCompletionPayload,
+    fetchWithUploadRetry,
     isUploadActionExpired,
     uploadBasicFile,
     uploadMultipartFile
@@ -21,6 +22,9 @@ import { toStoredUploadFile } from '../src/shared/hfUploadSession.js';
 
 const oidA = 'a'.repeat(64);
 const oidB = 'b'.repeat(64);
+const completionUrl = 'https://huggingface.co/api/complete_multipart' +
+    '?uploadId=test-upload&bucket=hf-hub-lfs-us-east-1&prefix=repos%2Ftest' +
+    '&expiration=Sat%2C+15+Aug+2026+20%3A54%3A55+GMT&signature=test-signature';
 
 function tick() {
     return new Promise((resolve) => setTimeout(resolve, 0));
@@ -71,7 +75,7 @@ function xhrFactoryFor(handler) {
                 size: 8,
                 actions: {
                     upload: {
-                        href: 'https://huggingface.co/complete',
+                        href: completionUrl,
                         header: {
                             chunk_size: '4',
                             '00002': 'https://storage.example/part-2',
@@ -104,6 +108,48 @@ function xhrFactoryFor(handler) {
     }
 }
 
+// multipart completion 必须由 Worker 转发到固定 HF 端点，不能成为任意 URL 代理。
+{
+    const originalFetch = globalThis.fetch;
+    let forwarded;
+    globalThis.fetch = async (url, init) => {
+        forwarded = { url, init };
+        return new Response(null, { status: 200 });
+    };
+    try {
+        const response = await handleHfUploadApi(new Request('https://local/api/admin/hf/complete-multipart', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                href: completionUrl,
+                oid: oidA,
+                parts: [{ partNumber: 1, etag: '"etag"' }]
+            })
+        }), {}, null, ['complete-multipart']);
+        assert.equal(response.status, 200);
+        assert.equal(forwarded.url, completionUrl);
+        assert.deepEqual(JSON.parse(forwarded.init.body), {
+            oid: oidA,
+            parts: [{ partNumber: 1, etag: '"etag"' }]
+        });
+
+        forwarded = null;
+        const rejected = await handleHfUploadApi(new Request('https://local/api/admin/hf/complete-multipart', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                href: completionUrl.replace('huggingface.co', 'example.com'),
+                oid: oidA,
+                parts: [{ partNumber: 1, etag: '"etag"' }]
+            })
+        }), {}, null, ['complete-multipart']);
+        assert.equal(rejected.status, 400);
+        assert.equal(forwarded, null);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+}
+
 {
     const files = [
         { path: 'b.bin', sha256: oidB, size: 2 },
@@ -120,7 +166,7 @@ function xhrFactoryFor(handler) {
 }
 
 assert.throws(() => sanitizeUploadAction({
-    href: 'https://huggingface.co/complete',
+    href: completionUrl,
     header: { chunk_size: 4, 1: 'https://storage.example/part-1' }
 }, 8), /分片列表不完整/);
 
@@ -158,6 +204,20 @@ assert.throws(() => sanitizeUploadAction({
     await Promise.all(tasks);
 }
 
+// 文件完成请求要插到普通分片队列前面，避免大量文件同时停在 100%。
+{
+    const pool = new UploadTaskPool(1);
+    const order = [];
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const active = pool.run(() => gate);
+    const normal = pool.run(() => { order.push('normal'); });
+    const priority = pool.run(() => { order.push('completion'); }, { priority: true });
+    release();
+    await Promise.all([active, normal, priority]);
+    assert.deepEqual(order, ['completion', 'normal']);
+}
+
 assert.deepEqual(createMultipartCompletionPayload(oidA, { 2: '"b"', 1: '"a"' }), {
     oid: oidA,
     parts: [
@@ -192,7 +252,7 @@ assert.deepEqual(createMultipartCompletionPayload(oidA, { 2: '"b"', 1: '"a"' }),
         oid: oidA,
         upload: {
             type: 'multipart',
-            href: 'https://huggingface.co/complete',
+            href: completionUrl,
             chunkSize: 4,
             parts: [
                 { partNumber: 1, url: 'https://storage.example/part-1' },
@@ -207,7 +267,8 @@ assert.deepEqual(createMultipartCompletionPayload(oidA, { 2: '"b"', 1: '"a"' }),
         random: () => 0,
         onWireBytes: (delta) => { wireBytes += delta; },
         onProgress: (loaded) => logicalSamples.push(loaded),
-        fetchFn: async (_url, init) => {
+        fetchFn: async (url, init) => {
+            assert.equal(url, '/api/admin/hf/complete-multipart');
             completionBody = JSON.parse(init.body);
             return new Response(null, { status: 200 });
         }
@@ -216,8 +277,42 @@ assert.deepEqual(createMultipartCompletionPayload(oidA, { 2: '"b"', 1: '"a"' }),
     assert.equal(attempts.get('https://storage.example/part-2'), 2);
     assert.equal(wireBytes, 12, 'wire speed includes the retransmitted four bytes');
     assert.equal(Math.max(...logicalSamples), 8, 'logical progress never exceeds the file size');
-    assert.deepEqual(completionBody, result.payload);
+    assert.deepEqual(completionBody, { href: completionUrl, ...result.payload });
     assert.deepEqual(result.parts, { 1: '"part-1"', 2: '"part-2"' });
+}
+
+// 多文件同时完成时，completion 与 PUT 共用同一个并发上限。
+{
+    const pool = new UploadTaskPool(2);
+    let active = 0;
+    let maximum = 0;
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const uploads = Array.from({ length: 5 }, () => uploadMultipartFile({
+        file: new Blob([new Uint8Array(1)]),
+        oid: oidA,
+        upload: {
+            type: 'multipart',
+            href: completionUrl,
+            chunkSize: 1,
+            parts: [{ partNumber: 1, url: 'https://storage.example/part-1' }]
+        },
+        completedParts: { 1: '"etag"' },
+        pool,
+        control: new UploadControl(),
+        fetchFn: async (url) => {
+            assert.equal(url, '/api/admin/hf/complete-multipart');
+            active++;
+            maximum = Math.max(maximum, active);
+            await gate;
+            active--;
+            return new Response(null, { status: 200 });
+        }
+    }));
+    await tick();
+    assert.equal(maximum, 2);
+    release();
+    await Promise.all(uploads);
 }
 
 // 暂停会 abort 当前 XHR；继续时重开当前片，但不消耗失败重试次数。
@@ -285,6 +380,17 @@ assert.equal(isUploadActionExpired({ expiresAt: 2000 }, 950, 60), false);
     await assert.rejects(delayed, { name: 'UploadCancelledError' });
 }
 
+// completion 无响应时必须主动中止并转成可重试错误。
+await assert.rejects(fetchWithUploadRetry('/api/admin/hf/complete-multipart', {}, {
+    requestTimeoutMs: 5,
+    maxAttempts: 1,
+    fetchFn: (_url, init) => new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => {
+            reject(new DOMException('Aborted', 'AbortError'));
+        }, { once: true });
+    })
+}), (err) => err?.retryable === true && /无响应/.test(err.message));
+
 // Vue 响应式 Proxy 必须在进入 IndexedDB 前转回可 structured-clone 的普通对象。
 {
     const reactiveState = reactive({
@@ -292,7 +398,7 @@ assert.equal(isUploadActionExpired({ expiresAt: 2000 }, 950, 60), false);
         path: 'data.xp3',
         upload: {
             type: 'multipart',
-            href: 'https://huggingface.co/complete',
+            href: completionUrl,
             expiresAt: 123,
             chunkSize: 4,
             parts: [{ partNumber: 1, url: 'https://storage.example/part-1' }]
