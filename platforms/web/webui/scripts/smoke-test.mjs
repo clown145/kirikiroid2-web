@@ -110,6 +110,7 @@ async function visit(path, { wait = 1800, assert } = {}) {
 await visit('/', {
     assert: async (page) => {
         await page.click('.account-trigger');
+        await page.waitForSelector('.account-menu');
         const account = await page.evaluate(() => ({
             menu: document.querySelector('.account-menu')?.textContent || '',
             providers: [...document.querySelectorAll('.provider-button')]
