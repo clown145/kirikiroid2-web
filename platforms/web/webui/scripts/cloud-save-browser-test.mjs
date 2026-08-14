@@ -67,7 +67,10 @@ try {
 
     await clickButton(page, '管理同步');
     await page.waitForSelector('.sync-panel');
-    await page.waitForFunction(() => !document.querySelector('.sync-loading'));
+    await page.waitForFunction(() => {
+        const btn = document.querySelector('.sync-toolbar button.btn-primary');
+        return btn && !btn.disabled && !document.querySelector('.sync-loading');
+    });
     await page.evaluate(() => document.querySelector('.sync-toolbar button.btn-primary')?.click());
     await page.waitForFunction(() =>
         document.body.innerText.includes('完成：') ||
@@ -87,7 +90,10 @@ try {
 
     await clickButton(page, '管理同步');
     await page.waitForSelector('.sync-panel');
-    await page.waitForFunction(() => !document.querySelector('.sync-loading'));
+    await page.waitForFunction(() => {
+        const btn = document.querySelector('.sync-toolbar button.btn-primary');
+        return btn && !btn.disabled && !document.querySelector('.sync-loading');
+    });
     await page.waitForFunction(() =>
         document.body.innerText.includes('仅站点云端') ||
         document.body.innerText.includes('仅WebDAV') ||
