@@ -66,6 +66,7 @@ try {
     }, gameId);
 
     await clickButton(page, '管理同步');
+    await page.waitForSelector('.sync-toolbar button');
     await clickButton(page, '同步全部存档');
     await page.waitForFunction(() => document.body.innerText.includes('完成：上传 1'), { timeout: 15000 });
     ok(await page.evaluate(() => document.body.innerText.includes('已同步')), 'UI 完成手动上传');
@@ -78,6 +79,7 @@ try {
     }, gameId);
 
     await clickButton(page, '管理同步');
+    await page.waitForSelector('.sync-toolbar button');
     await page.waitForFunction(() => document.body.innerText.includes('云端有更新'), { timeout: 10000 });
     await page.evaluate(() => {
         const row = [...document.querySelectorAll('.sync-row')]
