@@ -1,10 +1,12 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { api } from '../shared/api.js';
+import { Trophy } from '@lucide/vue';
 import AccountMenu from '../shared/AccountMenu.vue';
 import DownloadLocationDialog from '../shared/DownloadLocationDialog.vue';
 import OnboardingDialog from '../shared/OnboardingDialog.vue';
 import SyncPanel from '../shared/SyncPanel.vue';
+import LeaderboardDialog from '../shared/LeaderboardDialog.vue';
 import { localSaveSummary } from '../shared/cloudSaves.js';
 import { useFolderAccess } from '../shared/folderAccess.js';
 import { getSetting, setSetting } from '../shared/settings.js';
@@ -20,6 +22,7 @@ const search = ref('');
 const activeTag = ref('');
 const account = ref(null);
 const showSync = ref(false);
+const showLeaderboard = ref(false);
 const syncImmediately = ref(false);
 const dirtySaveCount = ref(0);
 const preparingDownload = ref(null);
@@ -431,6 +434,10 @@ onUnmounted(() => {
         </a>
 
         <div class="nav-right">
+            <button class="btn btn-ghost btn-sm nav-leaderboard" @click="showLeaderboard = true">
+                <Trophy :size="14" aria-hidden="true" />
+                <span>排行榜</span>
+            </button>
             <button class="btn btn-primary btn-sm nav-sync" @click="openSync(true)">
                 <span class="nav-sync-wide">同步全部存档</span><span class="nav-sync-short">同步</span>
             </button>
@@ -583,6 +590,11 @@ onUnmounted(() => {
         @cancel="cancelDownloadLocation"
         @select-folder="chooseFolder"
         @use-browser="skipFolder" />
+
+    <LeaderboardDialog
+        v-if="showLeaderboard"
+        :account="account"
+        @close="showLeaderboard = false" />
 
     <!-- 缓存管理：分游戏清理 -->
     <div v-if="showCachePanel" class="modal" @click.self="showCachePanel = false">

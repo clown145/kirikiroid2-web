@@ -49,6 +49,17 @@ export const api = {
         }
     },
 
+    // --- 游玩时长与排行榜 ---
+    sendPlaytimeHeartbeat: (gameId, deltaSeconds) =>
+        request('/api/playtime/heartbeat', { method: 'POST', ...body({ gameId, deltaSeconds }) }),
+    getMyPlaytimes: () => request('/api/playtime/me'),
+    updatePlaytimePrivacy: (hidePlaytime) =>
+        request('/api/playtime/privacy', { method: 'POST', ...body({ hidePlaytime }) }),
+    getGameLeaderboard: (gameId) =>
+        request(`/api/leaderboard/game/${encodeURIComponent(gameId)}`),
+    getGlobalLeaderboard: (type = 'users') =>
+        request(`/api/leaderboard/global/${encodeURIComponent(type)}`),
+
     // --- 后台 ---
     adminListGames: () => request('/api/admin/games').then((d) => d.games || []),
     createGame: (game) => request('/api/admin/games', { method: 'POST', ...body(game) }).then((d) => d.game),

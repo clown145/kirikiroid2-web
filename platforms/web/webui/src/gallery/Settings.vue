@@ -148,6 +148,24 @@ async function loadSyncStatus() {
     }
 }
 
+const updatingPrivacy = ref(false);
+
+async function toggleHidePlaytime(checked) {
+    if (updatingPrivacy.value) return;
+    updatingPrivacy.value = true;
+    try {
+        await api.updatePlaytimePrivacy(checked);
+        if (account.value) {
+            account.value.hidePlaytime = checked;
+        }
+        toast.success(checked ? '已开启匿名模式' : '已关闭匿名模式');
+    } catch (err) {
+        toast.error('修改隐私设置失败：' + (err.message || err));
+    } finally {
+        updatingPrivacy.value = false;
+    }
+}
+
 onMounted(() => {
     document.title = '设置 · 游戏库';
     load();
@@ -189,7 +207,7 @@ onMounted(() => {
                     </div>
                     <div class="mode-card-content">
                         <div class="mode-card-title">
-                            <strong>⚡ 边下边玩 · 流畅模式</strong>
+                            <strong>边下边玩 · 流畅模式</strong>
                             <span class="recommend-badge">推荐</span>
                         </div>
                         <small>进入游戏秒开，后台自动预载剩余章节与素材。彻底消除剧情翻页和语音加载等待，游玩后自动保留完整离线版。（推荐在 Wi-Fi / 宽带环境）</small>
@@ -208,7 +226,7 @@ onMounted(() => {
                     </div>
                     <div class="mode-card-content">
                         <div class="mode-card-title">
-                            <strong>💧 纯按需读取 · 省流模式</strong>
+                            <strong>纯按需读取 · 省流模式</strong>
                         </div>
                         <small>读到哪段剧情才实时下载当前资源，最省流量；但初次经过新场景或弱网时可能会有短暂加载等待。（适合移动蜂窝流量计费环境）</small>
                     </div>
@@ -327,6 +345,25 @@ onMounted(() => {
                 <div><dt>{{ storageUsageLabel }}</dt><dd>{{ cloud?.usage ? `${fmtBytes(cloud.usage.bytes)} / ${fmtBytes(cloud.usage.limit)}` : '由存储服务管理' }}</dd></div>
             </dl>
             <p class="sync-help"><a href="/help#sync">了解手动同步、冲突处理与数据存储方式</a></p>
+        </section>
+
+        <section v-if="account" class="settings-section" aria-labelledby="playtime-privacy-settings">
+            <div class="section-title">
+                <h2 id="playtime-privacy-settings">游玩记录与排行榜</h2>
+                <p>控制您在社区排行榜中的展示偏好与隐私设置。</p>
+            </div>
+
+            <label class="setting-row">
+                <span>
+                    <strong>在排行榜中匿名展示</strong>
+                    <small>开启后，您的名字和头像将在所有公开排行榜中显示为“匿名玩家”，只有您自己能看到您的真实记录与排名。</small>
+                </span>
+                <input
+                    type="checkbox"
+                    :checked="account.hidePlaytime"
+                    :disabled="updatingPrivacy"
+                    @change="toggleHidePlaytime($event.target.checked)">
+            </label>
         </section>
 
         <p v-if="status" class="settings-status" aria-live="polite">{{ status }}</p>

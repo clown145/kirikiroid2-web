@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed } from 'vue';
+import { Clock } from '@lucide/vue';
 import { coverSrc } from '../shared/api.js';
 
 const props = defineProps({
@@ -42,6 +43,18 @@ function fmt(bytes) {
     const mb = bytes / 1048576;
     return mb >= 1024 ? (mb / 1024).toFixed(1) + ' GB' : Math.round(mb) + ' MB';
 }
+
+const localPlaytimeText = computed(() => {
+    try {
+        const sec = parseInt(localStorage.getItem(`krkr2_playtime_${props.game.id}`) || '0', 10);
+        if (!sec || sec < 60) return null;
+        const mins = Math.floor(sec / 60);
+        if (mins < 60) return `${mins}m`;
+        return `${(sec / 3600).toFixed(1)}h`;
+    } catch {
+        return null;
+    }
+});
 </script>
 
 <template>
@@ -104,6 +117,10 @@ function fmt(bytes) {
                         : (downloading.finalizing ? '写入中' : downloading.pct + '%') }}
                 </span>
                 <span v-else-if="partialPct" class="cache-note">{{ partialPct }}%</span>
+                <span v-if="localPlaytimeText" class="playtime-note" :title="`已游玩 ${localPlaytimeText}`">
+                    <Clock :size="11" aria-hidden="true" />
+                    <span>{{ localPlaytimeText }}</span>
+                </span>
             </div>
         </div>
     </a>
@@ -296,4 +313,14 @@ function fmt(bytes) {
 }
 
 .cache-note.on { color: var(--fg-1); }
+
+.playtime-note {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    color: var(--fg-2);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
 </style>

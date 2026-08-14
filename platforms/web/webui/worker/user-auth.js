@@ -183,6 +183,7 @@ function rowToUser(row, providers = []) {
         id: row.id,
         displayName: row.display_name,
         avatarUrl: row.avatar_url || '',
+        hidePlaytime: !!row.hide_playtime,
         providers
     };
 }
@@ -301,7 +302,7 @@ async function readSession(request, db) {
     const now = Date.now();
     const row = await db.prepare(
         `SELECT s.token_hash, s.expires_at, s.last_seen_at,
-                u.id, u.display_name, u.avatar_url
+                u.id, u.display_name, u.avatar_url, u.hide_playtime
          FROM user_sessions s JOIN users u ON u.id = s.user_id
          WHERE s.token_hash = ?`
     ).bind(tokenHash).first();

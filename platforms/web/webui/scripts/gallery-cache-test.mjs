@@ -53,7 +53,8 @@ try {
     ok(storage.bound === false, '初始状态没有文件夹绑定');
 
     // 缓存管理面板
-    await page.click('.account-trigger');
+    await page.evaluate(() => document.querySelector('.account-trigger')?.click());
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 200)));
     const hasCacheBtn = await page.evaluate(() =>
         [...document.querySelectorAll('.account-menu button')]
             .some((b) => b.textContent.includes('本地缓存')));
@@ -180,6 +181,7 @@ try {
         });
     });
     await locationPage.goto(BASE + '/', { waitUntil: 'networkidle2' });
+    await locationPage.waitForSelector('.dl-btn');
     await locationPage.click('.dl-btn');
     await locationPage.waitForSelector('.download-location-dialog');
     const locationPrompt = await locationPage.$eval('.download-location-dialog', (el) => ({
@@ -432,6 +434,12 @@ try {
     await blockedPlayer.evaluate(() => {
         [...document.querySelectorAll('.folder-permission-actions button')]
             .find((button) => button.textContent.includes('解除绑定'))?.click();
+    });
+    await blockedPlayer.evaluate(() => new Promise((r) => setTimeout(r, 100)));
+    await blockedPlayer.evaluate(() => {
+        const btn = document.querySelector('.confirm-dialog-actions .btn-primary') ||
+                    document.querySelector('.confirm-dialog-actions button');
+        btn?.click();
     });
     await blockedPlayer.waitForFunction(() => window.__engineBoots > 0);
     ok(true, '明确解除绑定后播放器才继续启动');

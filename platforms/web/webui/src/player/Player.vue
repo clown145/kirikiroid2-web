@@ -11,6 +11,7 @@ import {
 } from '../shared/settings.js';
 import { useEngine } from './useEngine.js';
 import { useFullscreen } from './useFullscreen.js';
+import { usePlaytimeTracker } from './usePlaytimeTracker.js';
 import { attachSaveSpace } from './saveSpace.js';
 import EdgeToolbar from './EdgeToolbar.vue';
 import SaveSpacePanel from './SaveSpacePanel.vue';
@@ -34,6 +35,8 @@ const { isFullscreen, toggle: toggleFullscreen, available: fullscreenAvailable }
 
 // /play/local 是"打开本地文件"入口，不对应任何库里的条目
 const gameId = decodeURIComponent(location.pathname.replace(/^\/play\/?/, ''));
+const gameIdRef = computed(() => gameId);
+const { sessionSeconds, totalSeconds } = usePlaytimeTracker(gameIdRef, phase);
 
 // ?xp3= / ?game= / ?entry=：直接指定数据源，不查 D1。
 // 引擎开发用的入口 —— coi-server.py 就打印这种 URL（见根 README「Running」），

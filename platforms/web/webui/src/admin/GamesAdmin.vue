@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue';
+import { CloudUpload, Download, FileCode, Plus, Upload } from '@lucide/vue';
 import { api, coverSrc } from '../shared/api.js';
 import BackToGallery from '../shared/BackToGallery.vue';
 import { showConfirm } from '../shared/dialog.js';
@@ -343,16 +344,29 @@ onMounted(refresh);
     <main class="body">
         <div class="toolbar">
             <div class="toolbar-left">
-                <button class="btn btn-primary btn-sm" @click="openNew">+ 新增游戏</button>
+                <button class="btn btn-primary btn-sm" @click="openNew">
+                    <Plus :size="14" aria-hidden="true" />
+                    <span>新增游戏</span>
+                </button>
                 <span class="hint">共 {{ games.length }} 个条目，拖动行可调整顺序</span>
             </div>
             <div class="toolbar-right">
                 <button class="btn btn-primary btn-sm" title="一键上传游戏文件夹至 Hugging Face 仓库并生成加速直链" @click="showHfModal = true">
-                    🚀 上传到抱脸 (HF)
+                    <CloudUpload :size="14" aria-hidden="true" />
+                    <span>上传到 Hugging Face</span>
                 </button>
-                <button class="btn btn-sm" title="选择本地游戏文件夹，自动生成并原地保存 manifest.json" @click="generateManifest">⚡ 本地生成清单</button>
-                <button class="btn btn-sm" @click="importInput.click()">导入 JSON</button>
-                <button class="btn btn-sm" @click="exportJson" :disabled="!games.length">导出 JSON</button>
+                <button class="btn btn-sm" title="选择本地游戏文件夹，自动生成并原地保存 manifest.json" @click="generateManifest">
+                    <FileCode :size="14" aria-hidden="true" />
+                    <span>本地生成清单</span>
+                </button>
+                <button class="btn btn-sm" @click="importInput.click()">
+                    <Upload :size="14" aria-hidden="true" />
+                    <span>导入 JSON</span>
+                </button>
+                <button class="btn btn-sm" @click="exportJson" :disabled="!games.length">
+                    <Download :size="14" aria-hidden="true" />
+                    <span>导出 JSON</span>
+                </button>
                 <input ref="importInput" type="file" accept=".json,application/json" hidden @change="onImport">
                 <input ref="manifestInput" type="file" webkitdirectory directory multiple hidden @change="onFallbackFolderSelect">
             </div>
@@ -363,7 +377,10 @@ onMounted(refresh);
         <div v-else-if="games.length === 0" class="empty">
             <h2>还没有游戏</h2>
             <p>点击「新增游戏」手动添加，或导入一份 games.json。</p>
-            <button class="btn btn-primary" @click="openNew">新增第一个游戏</button>
+            <button class="btn btn-primary" @click="openNew">
+                <Plus :size="14" aria-hidden="true" />
+                <span>新增第一个游戏</span>
+            </button>
         </div>
 
         <table v-else class="table">

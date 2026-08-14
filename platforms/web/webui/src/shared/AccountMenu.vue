@@ -23,6 +23,7 @@ const logoutError = ref('');
 const status = ref('');
 const avatarFailed = ref(false);
 const menuPosition = ref({});
+const myPlaytimeSummary = ref(null);
 
 const initial = computed(() => (user.value?.displayName || '?').trim().charAt(0).toUpperCase());
 const showAvatar = computed(() => !!user.value?.avatarUrl && !avatarFailed.value);
@@ -87,6 +88,11 @@ async function refreshAccount() {
         status.value = err.message || '无法读取登录状态';
     } finally {
         loading.value = false;
+    }
+    if (user.value) {
+        api.getMyPlaytimes().then((res) => {
+            myPlaytimeSummary.value = res || null;
+        }).catch(() => {});
     }
 }
 
@@ -208,6 +214,9 @@ onUnmounted(() => {
                         <strong>{{ user.displayName }}</strong>
                         <small>
                             {{ user.providers.map((p) => p === 'steam' ? 'Steam' : 'GitHub').join(' · ') }}
+                            <template v-if="myPlaytimeSummary?.totalSeconds">
+                                · {{ (myPlaytimeSummary.totalSeconds / 3600).toFixed(1) }}h 游玩
+                            </template>
                         </small>
                     </span>
             </div>

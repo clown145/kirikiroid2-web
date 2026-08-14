@@ -12,6 +12,7 @@ import * as db from './db.js';
 import { handleAccount } from './user-auth.js';
 import { handleSaves } from './saves.js';
 import { handleHfUploadApi } from './hf-upload.js';
+import { handlePlaytime, handleLeaderboard } from './playtime.js';
 
 const PUBLIC_LIST_CACHE_KEY = 'https://krkr2.internal/api/games';
 const PUBLIC_LIST_MAX_AGE = 60;
@@ -359,6 +360,10 @@ export async function handleApi(request, env, ctx, pathname) {
     if (head === 'account') return handleAccount(request, env, ctx, rest);
 
     if (head === 'saves') return handleSaves(request, env, ctx, rest);
+
+    if (head === 'playtime') return handlePlaytime(request, env, ctx, rest);
+
+    if (head === 'leaderboard') return handleLeaderboard(request, env, ctx, rest);
 
     if (head === 'admin') return handleAdmin(request, env, ctx, rest);
 

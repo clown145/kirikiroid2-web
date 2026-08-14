@@ -6,6 +6,7 @@ import AccountMenu from '../shared/AccountMenu.vue';
 import BackToGallery from '../shared/BackToGallery.vue';
 import DownloadLocationDialog from '../shared/DownloadLocationDialog.vue';
 import SyncPanel from '../shared/SyncPanel.vue';
+import GameLeaderboard from './GameLeaderboard.vue';
 import { useFolderAccess } from '../shared/folderAccess.js';
 import { getSetting, requestDownloadHandoff, setSetting } from '../shared/settings.js';
 import { toast } from '../shared/toast.js';
@@ -328,6 +329,11 @@ onUnmounted(() => {
                 </div>
             </div>
         </article>
+
+        <GameLeaderboard
+            v-if="game"
+            :game-id="game.id"
+            :account="account" />
     </main>
 
     <DownloadLocationDialog

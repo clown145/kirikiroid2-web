@@ -1,5 +1,9 @@
 <script setup>
 import { ref, computed, watch, onUnmounted } from 'vue';
+import {
+    CheckCircle2, Clock, CloudUpload, Copy, Folder, FolderOpen,
+    Gauge, Package, Plus, Sparkles, X
+} from '@lucide/vue';
 import { toast } from '../shared/toast.js';
 import { toPinyinSlug } from '../shared/pinyin.js';
 import { computeFileSha256 } from '../shared/sha256.js';
@@ -466,10 +470,10 @@ onUnmounted(() => {
         <div class="hf-modal">
             <header class="hf-head">
                 <div class="hf-head-title">
-                    <span class="hf-logo">🤗</span>
+                    <CloudUpload class="hf-logo" :size="20" />
                     <h2>上传游戏到 Hugging Face 仓库</h2>
                 </div>
-                <button v-if="!uploading" class="btn btn-ghost btn-sm" @click="emit('close')">✕</button>
+                <button v-if="!uploading" class="btn btn-ghost btn-sm" @click="emit('close')"><X :size="16" /></button>
             </header>
 
             <div class="hf-body">
@@ -482,14 +486,17 @@ onUnmounted(() => {
                         @dragleave.prevent="isDragging = false"
                         @drop.prevent="onDrop"
                         @click="onPickFolder">
-                        <div class="drop-icon">📁</div>
+                        <div class="drop-icon"><Folder :size="40" /></div>
                         <h3>{{ files.length ? `已选择：${gameTitle} (${files.length} 个文件)` : '点击选择游戏文件夹' }}</h3>
                         <p class="drop-hint">
                             {{ files.length ? `总大小 ${formatBytes(totalBytes)}，点击可更换文件夹` : '支持全套 .xp3 / 音视频资源与 manifest.json 自动识别' }}
                         </p>
                         <div class="drop-fallback">
                             <span class="fallback-hint">如遇系统权限弹窗异常，可点此</span>
-                            <button type="button" class="btn btn-ghost btn-sm fallback-btn" @click.stop="dirInput.click()">📂 备用文件选择器</button>
+                            <button type="button" class="btn btn-ghost btn-sm fallback-btn" @click.stop="dirInput.click()">
+                                <FolderOpen :size="14" />
+                                <span>备用文件选择器</span>
+                            </button>
                         </div>
                         <input
                             ref="dirInput"
@@ -521,7 +528,9 @@ onUnmounted(() => {
                             <div class="field-item">
                                 <label>清单状态</label>
                                 <div class="manifest-status-badge" :class="{ ok: hasExistingManifest }">
-                                    {{ hasExistingManifest ? '✅ 检测到已有 manifest.json' : '⚡ 缺失 manifest.json，将自动生成' }}
+                                    <CheckCircle2 v-if="hasExistingManifest" :size="14" />
+                                    <Sparkles v-else :size="14" />
+                                    <span>{{ hasExistingManifest ? '检测到已有 manifest.json' : '缺失 manifest.json，将自动生成' }}</span>
                                 </div>
                             </div>
                         </div>
@@ -555,9 +564,9 @@ onUnmounted(() => {
                             <div class="bar-fill" :style="{ width: overallPercent + '%' }" />
                         </div>
                         <div class="dash-meta">
-                            <span>📦 已传输：{{ formatBytes(uploadedBytes) }} / {{ formatBytes(totalBytes) }}</span>
-                            <span>⚡ 上传速度：{{ currentSpeed }}</span>
-                            <span>⏱️ 预估剩余：{{ timeRemaining }}</span>
+                            <span><Package :size="13" /> 已传输：{{ formatBytes(uploadedBytes) }} / {{ formatBytes(totalBytes) }}</span>
+                            <span><Gauge :size="13" /> 上传速度：{{ currentSpeed }}</span>
+                            <span><Clock :size="13" /> 预估剩余：{{ timeRemaining }}</span>
                         </div>
                     </div>
 
@@ -572,12 +581,12 @@ onUnmounted(() => {
                                 <span class="col-file" :title="f.name">{{ f.name }}</span>
                                 <span class="col-size">{{ formatBytes(f.size) }}</span>
                                 <span class="col-status">
-                                    <span v-if="f.status === 'pending'" class="badge badge-pending">⏳ 等待中</span>
-                                    <span v-else-if="f.status === 'hashing'" class="badge badge-hash">🔍 校验哈希</span>
-                                    <span v-else-if="f.status === 'uploading'" class="badge badge-uploading">⚡ {{ f.progress }}%</span>
-                                    <span v-else-if="f.status === 'dedup'" class="badge badge-dedup">✨ 秒传 (云端已有)</span>
-                                    <span v-else-if="f.status === 'done'" class="badge badge-done">✅ 已完成</span>
-                                    <span v-else class="badge badge-err">❌ 失败</span>
+                                    <span v-if="f.status === 'pending'" class="badge badge-pending">等待中</span>
+                                    <span v-else-if="f.status === 'hashing'" class="badge badge-hash">校验哈希</span>
+                                    <span v-else-if="f.status === 'uploading'" class="badge badge-uploading">{{ f.progress }}%</span>
+                                    <span v-else-if="f.status === 'dedup'" class="badge badge-dedup">秒传 (云端已有)</span>
+                                    <span v-else-if="f.status === 'done'" class="badge badge-done">已完成</span>
+                                    <span v-else class="badge badge-err">失败</span>
                                 </span>
                             </div>
                         </div>
@@ -587,7 +596,7 @@ onUnmounted(() => {
                 <!-- 步骤 3: 上传完成 -->
                 <div v-else-if="step === 'completed'" class="step-completed">
                     <div class="complete-hero">
-                        <div class="complete-icon">🎉</div>
+                        <div class="complete-icon"><CheckCircle2 :size="44" /></div>
                         <h3>上传成功！资源已就绪</h3>
                         <p>游戏资源已同步至 Hugging Face <code>{{ targetRepo }}/{{ gameSlug }}</code> 并开启动态 CDN 加速中转。</p>
                     </div>
@@ -596,7 +605,10 @@ onUnmounted(() => {
                         <label>代理加速清单地址 (已配置 1 年专属边缘缓存隔离)：</label>
                         <div class="url-input-group">
                             <input readonly :value="proxiedManifestUrl" class="input">
-                            <button class="btn btn-sm" @click="copyUrl">📋 复制</button>
+                            <button class="btn btn-sm" @click="copyUrl">
+                                <Copy :size="14" />
+                                <span>复制</span>
+                            </button>
                         </div>
                     </div>
 
@@ -610,7 +622,8 @@ onUnmounted(() => {
                 <div v-if="step === 'select'">
                     <button class="btn" @click="emit('close')">取消</button>
                     <button class="btn btn-primary" :disabled="!files.length" @click="startUpload">
-                        🚀 开始上传到抱脸
+                        <CloudUpload :size="15" aria-hidden="true" />
+                        <span>开始上传到 Hugging Face</span>
                     </button>
                 </div>
                 <div v-else-if="step === 'uploading'">
@@ -619,7 +632,8 @@ onUnmounted(() => {
                 <div v-else-if="step === 'completed'" class="complete-actions">
                     <button class="btn" @click="emit('close')">关闭</button>
                     <button class="btn btn-primary btn-lg" @click="handleCreateGameDirectly">
-                        ➕ 一键创建游戏并填好表单
+                        <Plus :size="16" aria-hidden="true" />
+                        <span>一键创建游戏并填好表单</span>
                     </button>
                 </div>
             </footer>
