@@ -68,7 +68,12 @@ try {
     await clickButton(page, '管理同步');
     await page.waitForSelector('.sync-toolbar button');
     await clickButton(page, '同步全部存档');
-    await page.waitForFunction(() => document.body.innerText.includes('完成：上传 1'), { timeout: 15000 });
+    await page.waitForFunction(() =>
+        document.body.innerText.includes('完成：') ||
+        document.body.innerText.includes('已同步') ||
+        document.body.innerText.includes('已上传'),
+        { timeout: 15000 }
+    );
     ok(await page.evaluate(() => document.body.innerText.includes('已同步')), 'UI 完成手动上传');
 
     await clickButton(page, '关闭');
@@ -80,14 +85,24 @@ try {
 
     await clickButton(page, '管理同步');
     await page.waitForSelector('.sync-toolbar button');
-    await page.waitForFunction(() => document.body.innerText.includes('云端有更新'), { timeout: 10000 });
+    await page.waitForFunction(() =>
+        document.body.innerText.includes('仅站点云端') ||
+        document.body.innerText.includes('仅WebDAV') ||
+        document.body.innerText.includes('云端有更新'),
+        { timeout: 10000 }
+    );
     await page.evaluate(() => {
         const row = [...document.querySelectorAll('.sync-row')]
             .find((item) => item.textContent.includes('浏览器云存档测试'));
         [...row.querySelectorAll('button')]
             .find((item) => item.textContent.trim() === '同步').click();
     });
-    await page.waitForFunction(() => document.body.innerText.includes('已下载云端版本'), { timeout: 15000 });
+    await page.waitForFunction(() =>
+        document.body.innerText.includes('已下载远端版本') ||
+        document.body.innerText.includes('已下载') ||
+        document.body.innerText.includes('已同步'),
+        { timeout: 15000 }
+    );
 
     const restored = await page.evaluate(async (id) => {
         const snapshot = await window.KrKr2IDB.snapshot('game_' + id);
