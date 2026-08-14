@@ -115,7 +115,9 @@ function isNeverCached(url) {
     return url.pathname === '/api' ||
            url.pathname.indexOf('/api/') === 0 ||
            url.pathname === '/admin' ||
-           url.pathname.indexOf('/admin/') === 0;
+           url.pathname.indexOf('/admin/') === 0 ||
+           url.pathname === '/hf' ||
+           url.pathname.indexOf('/hf/') === 0;
 }
 
 /* 引擎的版本指针（Worker 从它内容里读出 buildVersion 拼成 engineBase，
@@ -164,6 +166,9 @@ self.addEventListener('fetch', function (event) {
     var request = event.request;
     if (request.method !== 'GET') return;
 
+    /* Range 请求 (206 Partial) 不进 Cache Storage 缓存，必须直通网络 */
+    if (request.headers.has('range')) return;
+
     var url = new URL(request.url);
 
     if (isNeverCached(url)) return;   /* 交给网络，不拦截 */
@@ -173,7 +178,7 @@ self.addEventListener('fetch', function (event) {
         event.respondWith(
             caches.match(request).then(function (cached) {
                 var fetching = fetch(request).then(function (response) {
-                    if (response.ok) {
+                    if (response.status === 200) {
                         var clone = response.clone();
                         caches.open(CACHE_NAME).then(function (c) { c.put(request, clone); });
                     }
@@ -192,8 +197,10 @@ self.addEventListener('fetch', function (event) {
     if (request.mode === 'navigate') {
         event.respondWith(
             fetch(request).then(function (response) {
-                var clone = response.clone();
-                caches.open(CACHE_NAME).then(function (c) { c.put(request, clone); });
+                if (response.status === 200) {
+                    var clone = response.clone();
+                    caches.open(CACHE_NAME).then(function (c) { c.put(request, clone); });
+                }
                 return response;
             }).catch(function () {
                 return caches.match(request).then(function (cached) {
@@ -220,9 +227,8 @@ self.addEventListener('fetch', function (event) {
                 if (cached) return cached;
                 return fetch(request).then(function (response) {
                     /* basic = 同源；cors = 跨域且对方给了 CORS 头。
-                     * opaque（无 CORS）不缓存：读不到状态码，存进去等于
-                     * 把一个可能是 403 的响应永久钉死。 */
-                    var cacheable = response.ok &&
+                     * 只有 200 OK 能写入 Cache Storage；206 Partial 抛错、403/500 不缓存。 */
+                    var cacheable = response.status === 200 &&
                         (response.type === 'basic' || response.type === 'cors');
                     if (cacheable) {
                         var clone = response.clone();

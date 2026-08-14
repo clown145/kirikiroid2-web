@@ -103,46 +103,76 @@ export async function handleHfProxy(request, env, ctx, pathname) {
         return new Response('Invalid Hugging Face proxy path', { status: 400 });
     }
 
-    const reqHeaders = new Headers();
-    // 透传 Range、ETag 相关条件头
+    const cfTtl = parsed.isManifest ? FIVE_MINUTES_SECONDS : ONE_YEAR_SECONDS;
+    const ua = request.headers.get('user-agent') ||
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+    // 1. 向 Hugging Face 请求以获得对应 Range 的签名重定向地址
+    const hfReqHeaders = new Headers();
+    hfReqHeaders.set('User-Agent', ua);
+
     const passHeaders = ['range', 'if-none-match', 'if-modified-since'];
     for (const h of passHeaders) {
         const val = request.headers.get(h);
-        if (val) reqHeaders.set(h, val);
+        if (val) hfReqHeaders.set(h, val);
     }
 
-    // 若配置了 HF_TOKEN，则附带认证头（支持私有仓库）
     const token = env.HF_TOKEN || '';
     if (token) {
-        reqHeaders.set('Authorization', `Bearer ${token}`);
+        hfReqHeaders.set('Authorization', `Bearer ${token}`);
     }
 
-    // 缓存控制：游戏实体资源在 Cloudflare CDN 边缘缓存 1 年，manifest 5 分钟
-    const cfTtl = parsed.isManifest ? FIVE_MINUTES_SECONDS : ONE_YEAR_SECONDS;
-    const fetchOptions = {
-        method: request.method,
-        headers: reqHeaders,
-        redirect: 'follow'
-    };
-
-    // 如果运行在 Cloudflare Workers 环境且支持 cf 对象，开启 CDN 边缘缓存
-    if (typeof request.cf !== 'undefined') {
-        fetchOptions.cf = {
-            cacheEverything: true,
-            cacheTtl: cfTtl,
-            cacheTtlByStatus: {
-                '200-299': cfTtl,
-                '404': 60,
-                '500-599': 0
-            }
-        };
-    }
-
-    let upstreamRes;
+    let hfRes;
     try {
-        upstreamRes = await fetch(parsed.targetUrl, fetchOptions);
+        hfRes = await fetch(parsed.targetUrl, {
+            method: request.method,
+            headers: hfReqHeaders,
+            redirect: 'manual'
+        });
     } catch (err) {
         return new Response('Failed to fetch upstream from Hugging Face: ' + err.message, { status: 502 });
+    }
+
+    let contentUrl = parsed.targetUrl;
+    let isRedirected = false;
+
+    if ([301, 302, 303, 307, 308].includes(hfRes.status)) {
+        const loc = hfRes.headers.get('location');
+        if (loc) {
+            contentUrl = new URL(loc, parsed.targetUrl).href;
+            isRedirected = true;
+        }
+    } else if (!hfRes.ok && hfRes.status !== 206 && hfRes.status !== 304) {
+        return new Response(hfRes.body, {
+            status: hfRes.status,
+            statusText: hfRes.statusText,
+            headers: hfRes.headers
+        });
+    }
+
+    // 2. 从目标 CDN / S3 获取数据（不携带 HF Token，避免 S3 403 认证冲突）
+    let upstreamRes;
+    if (isRedirected) {
+        const contentHeaders = new Headers();
+        contentHeaders.set('User-Agent', ua);
+        for (const h of passHeaders) {
+            const val = request.headers.get(h);
+            if (val) contentHeaders.set(h, val);
+        }
+
+        const fetchOptions = {
+            method: request.method,
+            headers: contentHeaders,
+            redirect: 'follow'
+        };
+
+        try {
+            upstreamRes = await fetch(contentUrl, fetchOptions);
+        } catch (err) {
+            return new Response('Failed to fetch content from Hugging Face CDN: ' + err.message, { status: 502 });
+        }
+    } else {
+        upstreamRes = hfRes;
     }
 
     // 构建响应头
