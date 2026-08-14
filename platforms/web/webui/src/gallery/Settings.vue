@@ -5,6 +5,7 @@ import { api } from '../shared/api.js';
 import AccountMenu from '../shared/AccountMenu.vue';
 import BackToGallery from '../shared/BackToGallery.vue';
 import SyncPanel from '../shared/SyncPanel.vue';
+import Switch from '../shared/Switch.vue';
 import {
     getDevice, getSyncBackend, getSyncProviderStatus, localSaveSummary, setDeviceName
 } from '../shared/cloudSaves.js';
@@ -41,8 +42,9 @@ const lastSyncedAt = computed(() => Math.max(0, ...localRows.value.map((row) => 
 const storageUsageLabel = computed(() => settings.value.saveSyncProvider === 'webdav'
     ? '存储空间' : '站点云端用量');
 
-function updateSetting(key, event) {
-    settings.value = setSetting(key, event.target.checked);
+function updateSetting(key, val) {
+    const nextVal = typeof val === 'boolean' ? val : val?.target?.checked ?? !!val;
+    settings.value = setSetting(key, nextVal);
 }
 
 function setDownloadMode(isStream) {
@@ -265,13 +267,16 @@ onMounted(() => {
                 </label>
             </div>
 
-            <label class="setting-row">
+            <div class="setting-row">
                 <span>
                     <strong>完整下载前建议选择文件夹</strong>
                     <small>文件夹里的游戏不会随浏览器缓存被清除；关闭后会直接使用浏览器内部存储。</small>
                 </span>
-                <input type="checkbox" :checked="settings.downloadFolderPrompt" @change="updateSetting('downloadFolderPrompt', $event)">
-            </label>
+                <Switch
+                    :model-value="settings.downloadFolderPrompt"
+                    aria-label="完整下载前建议选择文件夹"
+                    @update:model-value="updateSetting('downloadFolderPrompt', $event)" />
+            </div>
         </section>
 
         <section class="settings-section" aria-labelledby="save-settings">
@@ -334,7 +339,9 @@ onMounted(() => {
                     </label>
                 </div>
                 <label class="remember-password">
-                    <input v-model="webDav.rememberPassword" type="checkbox">
+                    <Switch
+                        v-model="webDav.rememberPassword"
+                        aria-label="在这台设备上记住密码" />
                     <span>
                         <strong>在这台设备上记住密码</strong>
                         <small>开启后密码会保存在浏览器本地；建议使用 WebDAV 应用专用密码。</small>
@@ -351,13 +358,16 @@ onMounted(() => {
                 </div>
             </div>
 
-            <label class="setting-row">
+            <div class="setting-row">
                 <span>
                     <strong>回到游戏库时提醒同步</strong>
                     <small>只显示待同步提示，不会自动上传或覆盖任何版本。</small>
                 </span>
-                <input type="checkbox" :checked="settings.saveSyncReminder" @change="updateSetting('saveSyncReminder', $event)">
-            </label>
+                <Switch
+                    :model-value="settings.saveSyncReminder"
+                    aria-label="回到游戏库时提醒同步"
+                    @update:model-value="updateSetting('saveSyncReminder', $event)" />
+            </div>
 
             <div class="setting-row device-row">
                 <span>
@@ -385,28 +395,28 @@ onMounted(() => {
                 <p>控制时长同步、社区排行榜参与偏好与个人数据清理。</p>
             </div>
 
-            <label class="setting-row">
+            <div class="setting-row">
                 <span>
                     <strong>记录并上报游玩时长</strong>
                     <small>开启后，游玩时长会自动同步到云端并参与社区排行榜；关闭后不会向服务器上报任何游玩数据。（默认关闭）</small>
                 </span>
-                <input
-                    type="checkbox"
-                    :checked="settings.uploadPlaytime"
-                    @change="updateSetting('uploadPlaytime', $event)">
-            </label>
+                <Switch
+                    :model-value="settings.uploadPlaytime"
+                    aria-label="记录并上报游玩时长"
+                    @update:model-value="updateSetting('uploadPlaytime', $event)" />
+            </div>
 
-            <label v-if="account && settings.uploadPlaytime" class="setting-row">
+            <div v-if="account && settings.uploadPlaytime" class="setting-row">
                 <span>
                     <strong>在排行榜中匿名展示</strong>
                     <small>开启后，您的名字和头像将在所有公开排行榜中显示为“匿名玩家”，只有您自己能看到您的真实记录与排名。</small>
                 </span>
-                <input
-                    type="checkbox"
-                    :checked="account.hidePlaytime"
+                <Switch
+                    :model-value="account.hidePlaytime"
                     :disabled="updatingPrivacy"
-                    @change="toggleHidePlaytime($event.target.checked)">
-            </label>
+                    aria-label="在排行榜中匿名展示"
+                    @update:model-value="toggleHidePlaytime($event)" />
+            </div>
 
             <div v-if="account" class="setting-row action-row">
                 <span>

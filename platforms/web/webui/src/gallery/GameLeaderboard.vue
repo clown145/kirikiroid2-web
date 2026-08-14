@@ -2,6 +2,9 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import { Trophy, Clock, Users, EyeOff, User } from '@lucide/vue';
 import { api } from '../shared/api.js';
+import { getSetting, setSetting } from '../shared/settings.js';
+import { toast } from '../shared/toast.js';
+import Switch from '../shared/Switch.vue';
 
 const props = defineProps({
     gameId: { type: String, required: true },
@@ -13,6 +16,17 @@ const error = ref('');
 const stats = ref({ playerCount: 0, totalSeconds: 0 });
 const leaderboard = ref([]);
 const myRank = ref(null);
+const uploadPlaytime = ref(getSetting('uploadPlaytime', false));
+
+function onTogglePlaytime(checked) {
+    uploadPlaytime.value = checked;
+    setSetting('uploadPlaytime', checked);
+    if (checked) {
+        toast.success('已开启游玩时长记录与排行同步');
+    } else {
+        toast.info('已关闭游玩时长同步');
+    }
+}
 
 function fmtPlaytime(seconds) {
     if (!seconds || seconds <= 0) return { val: '0', unit: 'm' };
@@ -80,6 +94,18 @@ watch(() => props.gameId, () => {
                     <Clock :size="13" aria-hidden="true" />
                     <span>累计 {{ fmtTotalHours(stats.totalSeconds) }}</span>
                 </span>
+            </div>
+        </div>
+
+        <!-- 未开启上报时的轻量快捷提示 -->
+        <div v-if="!uploadPlaytime && !loading && !error" class="board-optin-bar">
+            <span class="optin-bar-text">未开启时长记录，开启后你的游玩数据将实时参与本作品排行</span>
+            <div class="optin-bar-action">
+                <Switch
+                    :model-value="uploadPlaytime"
+                    size="sm"
+                    aria-label="开启或关闭游玩时长同步"
+                    @update:model-value="onTogglePlaytime" />
             </div>
         </div>
 
@@ -248,6 +274,28 @@ watch(() => props.gameId, () => {
 
 .stat-sep {
     opacity: 0.5;
+}
+
+.board-optin-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    margin-bottom: var(--space-3);
+    border-radius: var(--radius-sm);
+    background: var(--bg-2);
+    border: 1px dashed var(--line-strong);
+}
+
+.optin-bar-text {
+    font-size: 11px;
+    color: var(--fg-2);
+    line-height: 1.4;
+}
+
+.optin-bar-action {
+    flex-shrink: 0;
 }
 
 .board-skeleton {

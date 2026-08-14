@@ -224,6 +224,7 @@ try {
         '关闭建议后再次完整下载会直接使用浏览器内部存储');
 
     await locationPage.click('.account-trigger');
+    await locationPage.waitForSelector('.account-menu');
     await locationPage.evaluate(() => {
         [...document.querySelectorAll('.account-menu button')]
             .find((button) => button.textContent.includes('本地缓存'))?.click();

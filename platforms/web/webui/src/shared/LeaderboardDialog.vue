@@ -2,6 +2,9 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import { Trophy, Users, Flame, Clock, X, EyeOff, Gamepad2 } from '@lucide/vue';
 import { api, coverSrc } from './api.js';
+import { getSetting, setSetting } from './settings.js';
+import { toast } from './toast.js';
+import Switch from './Switch.vue';
 
 const props = defineProps({
     account: { type: Object, default: null }
@@ -13,6 +16,17 @@ const loading = ref(true);
 const error = ref('');
 const userList = ref([]);
 const gameList = ref([]);
+const uploadPlaytime = ref(getSetting('uploadPlaytime', false));
+
+function onTogglePlaytime(checked) {
+    uploadPlaytime.value = checked;
+    setSetting('uploadPlaytime', checked);
+    if (checked) {
+        toast.success('已开启游玩时长记录与排行同步');
+    } else {
+        toast.info('已关闭游玩时长同步（不再向云端上报数据）');
+    }
+}
 
 function fmtPlaytime(seconds) {
     if (!seconds || seconds <= 0) return { val: '0', unit: 'm' };
@@ -79,7 +93,7 @@ onMounted(() => {
                     </button>
                 </header>
 
-                <!-- Tab 切换 -->
+                <!-- Tab 切换与快捷设置 -->
                 <div class="lb-tabs-bar">
                     <div class="lb-tabs" role="tablist">
                         <button
@@ -103,10 +117,29 @@ onMounted(() => {
                             <span>热门作品榜</span>
                         </button>
                     </div>
+
+                    <div class="lb-sync-toggle" :title="uploadPlaytime ? '游玩时长已开启自动同步与排行' : '开启后游玩时长将自动同步并参与社区排行'">
+                        <span class="sync-toggle-label">{{ uploadPlaytime ? '时长同步中' : '同步我的时长' }}</span>
+                        <Switch
+                            :model-value="uploadPlaytime"
+                            size="sm"
+                            aria-label="开启或关闭游玩时长同步"
+                            @update:model-value="onTogglePlaytime" />
+                    </div>
                 </div>
 
                 <!-- 列表容器 -->
                 <div class="lb-body">
+                    <!-- 未开启时长上报提示条 -->
+                    <div v-if="!uploadPlaytime && !loading && !error" class="lb-optin-banner">
+                        <div class="optin-left">
+                            <Clock :size="14" class="optin-icon" aria-hidden="true" />
+                            <span class="optin-text">游玩时长同步已关闭，开启后你的游玩数据将实时汇总并参与排行榜</span>
+                        </div>
+                        <button type="button" class="btn btn-primary btn-sm" @click="onTogglePlaytime(true)">
+                            一键开启
+                        </button>
+                    </div>
                     <!-- 骨架屏 -->
                     <div v-if="loading" class="lb-skeleton" aria-label="正在加载排行榜">
                         <div v-for="i in 5" :key="i" class="skeleton-row">
@@ -327,9 +360,27 @@ onMounted(() => {
 }
 
 .lb-tabs-bar {
-    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 10px 24px;
     background: var(--bg-2);
     border-bottom: 1px solid var(--line);
+}
+
+.lb-sync-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+}
+
+.sync-toggle-label {
+    font-size: 11px;
+    color: var(--fg-2);
+    white-space: nowrap;
+    user-select: none;
 }
 
 .lb-tabs {
@@ -364,6 +415,36 @@ onMounted(() => {
     background: var(--bg-3);
     color: var(--fg-0);
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+.lb-optin-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-2);
+    border: 1px dashed var(--line-strong);
+}
+
+.optin-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.optin-icon {
+    color: var(--fg-2);
+    flex-shrink: 0;
+}
+
+.optin-text {
+    font-size: 12px;
+    color: var(--fg-1);
+    line-height: 1.5;
 }
 
 .lb-body {
