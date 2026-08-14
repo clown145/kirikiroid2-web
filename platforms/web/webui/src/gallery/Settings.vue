@@ -44,6 +44,10 @@ function updateSetting(key, event) {
     settings.value = setSetting(key, event.target.checked);
 }
 
+function setDownloadMode(isStream) {
+    settings.value = setSetting('playWhileDownloading', isStream);
+}
+
 async function selectSyncProvider(provider) {
     settings.value = setSetting('saveSyncProvider', provider);
     status.value = provider === 'webdav' && !getSyncProviderStatus().configured
@@ -168,16 +172,49 @@ onMounted(() => {
 
         <section class="settings-section" aria-labelledby="download-settings">
             <div class="section-title">
-                <h2 id="download-settings">下载</h2>
-                <p>控制游戏运行期间的资源获取方式。</p>
+                <h2 id="download-settings">下载与加载</h2>
+                <p>控制游戏运行期间的资源获取方式与存储行为。</p>
             </div>
-            <label class="setting-row">
-                <span>
-                    <strong>游玩时继续下载资源</strong>
-                    <small>开启后会在后台补齐未访问的分支资源，可能与当前读取争抢带宽。</small>
-                </span>
-                <input type="checkbox" :checked="settings.playWhileDownloading" @change="updateSetting('playWhileDownloading', $event)">
-            </label>
+
+            <div class="setting-mode-group" role="radiogroup" aria-label="游戏加载模式">
+                <label
+                    class="setting-mode-card"
+                    :class="{ active: settings.playWhileDownloading }">
+                    <div class="mode-card-radio">
+                        <input
+                            type="radio"
+                            name="settings-download-mode"
+                            :checked="settings.playWhileDownloading"
+                            @change="setDownloadMode(true)">
+                    </div>
+                    <div class="mode-card-content">
+                        <div class="mode-card-title">
+                            <strong>⚡ 边下边玩 · 流畅模式</strong>
+                            <span class="recommend-badge">推荐</span>
+                        </div>
+                        <small>进入游戏秒开，后台自动预载剩余章节与素材。彻底消除剧情翻页和语音加载等待，游玩后自动保留完整离线版。（推荐在 Wi-Fi / 宽带环境）</small>
+                    </div>
+                </label>
+
+                <label
+                    class="setting-mode-card"
+                    :class="{ active: !settings.playWhileDownloading }">
+                    <div class="mode-card-radio">
+                        <input
+                            type="radio"
+                            name="settings-download-mode"
+                            :checked="!settings.playWhileDownloading"
+                            @change="setDownloadMode(false)">
+                    </div>
+                    <div class="mode-card-content">
+                        <div class="mode-card-title">
+                            <strong>💧 纯按需读取 · 省流模式</strong>
+                        </div>
+                        <small>读到哪段剧情才实时下载当前资源，最省流量；但初次经过新场景或弱网时可能会有短暂加载等待。（适合移动蜂窝流量计费环境）</small>
+                    </div>
+                </label>
+            </div>
+
             <label class="setting-row">
                 <span>
                     <strong>完整下载前建议选择文件夹</strong>
@@ -309,7 +346,17 @@ onMounted(() => {
 .settings-section + .settings-section { margin-top: 36px; }
 .section-title { padding: 18px 0 14px; }
 .section-title-action { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
-.section-title h2 { margin: 0 0 5px; font-size: 15px; }
+.setting-mode-group { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: 8px; }
+.setting-mode-card { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-3) var(--space-4); border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-2); cursor: pointer; transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease); }
+.setting-mode-card:hover { background: var(--bg-3); border-color: var(--line-strong); }
+.setting-mode-card.active { background: var(--bg-3); border-color: var(--accent); }
+.setting-mode-card .mode-card-radio { margin-top: 2px; }
+.setting-mode-card .mode-card-radio input[type="radio"] { accent-color: var(--fg-0); cursor: pointer; }
+.setting-mode-card .mode-card-content { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; }
+.setting-mode-card .mode-card-title { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.setting-mode-card strong { font-size: 13px; font-weight: 600; color: var(--fg-0); }
+.setting-mode-card small { color: var(--fg-1); font-size: 11px; line-height: 1.55; }
+.recommend-badge { padding: 1px 6px; border-radius: 4px; background: rgba(250, 204, 21, 0.15); color: #fde047; border: 1px solid rgba(250, 204, 21, 0.3); font-size: 10px; font-weight: 600; }
 .setting-row { min-height: 74px; display: flex; align-items: center; justify-content: space-between; gap: 28px; padding: 14px 0; border-top: 1px solid var(--line); }
 .setting-row > span { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 .setting-row strong { font-size: 13px; font-weight: 550; }

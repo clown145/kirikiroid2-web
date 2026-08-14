@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { api } from '../shared/api.js';
 import AccountMenu from '../shared/AccountMenu.vue';
 import DownloadLocationDialog from '../shared/DownloadLocationDialog.vue';
+import OnboardingDialog from '../shared/OnboardingDialog.vue';
 import SyncPanel from '../shared/SyncPanel.vue';
 import { localSaveSummary } from '../shared/cloudSaves.js';
 import { useFolderAccess } from '../shared/folderAccess.js';
@@ -23,6 +24,8 @@ const syncImmediately = ref(false);
 const dirtySaveCount = ref(0);
 const preparingDownload = ref(null);
 const showIntro = ref(false);
+const showOnboarding = ref(false);
+const ONBOARDING_DISMISSED_KEY = 'krkr2-onboarding-dismissed';
 const INTRO_DISMISSED_KEY = 'krkr2-intro-dismissed';
 const COMPAT_DISMISSED_KEY = 'krkr2-compat-dismissed';
 
@@ -375,7 +378,22 @@ function dismissIntro() {
     try { localStorage.setItem(INTRO_DISMISSED_KEY, '1'); } catch {}
 }
 
+async function onOnboardingComplete() {
+    showOnboarding.value = false;
+    await refreshStorage(false);
+    await refreshCache();
+}
+
+function onOnboardingClose() {
+    showOnboarding.value = false;
+}
+
 onMounted(async () => {
+    try {
+        showOnboarding.value = localStorage.getItem(ONBOARDING_DISMISSED_KEY) !== '1';
+    } catch {
+        showOnboarding.value = false;
+    }
     try { showIntro.value = localStorage.getItem(INTRO_DISMISSED_KEY) !== '1'; }
     catch { showIntro.value = true; }
     try { await refreshStorage(true); } catch {}
@@ -639,6 +657,11 @@ onUnmounted(() => {
         :account="account"
         :start-immediately="syncImmediately"
         @close="closeSync" />
+
+    <OnboardingDialog
+        v-if="showOnboarding"
+        @close="onOnboardingClose"
+        @complete="onOnboardingComplete" />
 </template>
 
 <style scoped>
