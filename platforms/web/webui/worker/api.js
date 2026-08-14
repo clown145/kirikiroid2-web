@@ -100,8 +100,13 @@ async function handlePublicList(request, env, ctx) {
     const cache = caches.default;
     const cacheKey = new Request(PUBLIC_LIST_CACHE_KEY);
 
-    const hit = await cache.match(cacheKey);
-    if (hit) return hit;
+    const noCache = request.headers.get('Cache-Control') === 'no-cache' ||
+                    request.headers.get('Pragma') === 'no-cache';
+
+    if (!noCache) {
+        const hit = await cache.match(cacheKey);
+        if (hit) return hit;
+    }
 
     const games = await db.listPublishedGames(env.DB);
     const response = json(
@@ -109,7 +114,9 @@ async function handlePublicList(request, env, ctx) {
         { headers: { 'Cache-Control': `public, max-age=${PUBLIC_LIST_MAX_AGE}` } }
     );
 
-    ctx.waitUntil(cache.put(cacheKey, response.clone()));
+    if (!noCache && ctx?.waitUntil) {
+        ctx.waitUntil(cache.put(cacheKey, response.clone()));
+    }
     return response;
 }
 

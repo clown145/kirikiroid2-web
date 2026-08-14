@@ -62,6 +62,7 @@ try {
         name: '__Host-krkr2_user', value: token, url: `${BASE}/`,
         httpOnly: true, secure: true, sameSite: 'Lax'
     });
+    await fetch(`${BASE}/api/games`, { headers: { 'Cache-Control': 'no-cache' } });
     await page.goto(`${BASE}/settings`, { waitUntil: 'networkidle2' });
 
     await page.evaluate(async (id) => {
