@@ -1,60 +1,272 @@
-// Hugging Face 仓库上传与提交 API 协调器。
-//
-// 提供给后台管理员界面的安全上传能力：
-// 1. /api/admin/hf/prepare-upload: 调用 LFS Batch API 进行秒传检测与获取 S3 预签名上传凭证。
-// 2. /api/admin/hf/commit: 调用 Commit API 原子提交所有已上传的 LFS 文件与普通文件（如 manifest.json）。
+// Hugging Face LFS 协商、校验与 Commit API。
+// 大文件字节流直接从浏览器发往 HF 返回的预签名地址，Worker 只保管 HF_TOKEN
+// 并负责调用固定的 huggingface.co API，避免大文件经过 Worker 请求体。
 
 import { json, error } from './headers.js';
-import { isAuthed } from './auth.js';
+
+export const HF_LFS_BATCH_LIMIT = 100;
+export const HF_COMMIT_OPERATION_LIMIT = 10000;
+
+const SHA256_RE = /^[a-f0-9]{64}$/;
+const REPO_PART_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,95})$/;
+const BRANCH_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,199})$/;
+
+class InputError extends Error {}
 
 function getHfToken(env) {
     return env.HF_TOKEN || '';
 }
 
+function defaultRepo(env) {
+    return `${env.HF_DEFAULT_OWNER || 'clown145'}/${env.HF_DEFAULT_REPO || 'gal'}`;
+}
+
+export function normalizeHfRepo(value, fallback = '') {
+    const repo = String(value || fallback).trim();
+    const parts = repo.split('/');
+    if (parts.length !== 2 || !parts.every((part) => REPO_PART_RE.test(part))) {
+        throw new InputError('repo 必须是 owner/name 格式');
+    }
+    return repo;
+}
+
+export function normalizeHfPath(value) {
+    const rawPath = String(value || '').replace(/\\/g, '/');
+    const path = rawPath.trim();
+    const segments = path.split('/');
+    if (path !== rawPath || !path || path.length > 1024 || path.startsWith('/') || path.endsWith('/') ||
+        /[\u0000-\u001f\u007f]/.test(path) ||
+        segments.some((segment) => !segment || segment === '.' || segment === '..')) {
+        throw new InputError('文件路径无效');
+    }
+    return path;
+}
+
+export function normalizeOid(value) {
+    const oid = String(value || '').toLowerCase().trim();
+    if (!SHA256_RE.test(oid)) throw new InputError('sha256/oid 必须是 64 位十六进制字符串');
+    return oid;
+}
+
+export function normalizeFileSize(value) {
+    const size = Number(value);
+    if (!Number.isSafeInteger(size) || size < 0) throw new InputError('size 必须是非负安全整数');
+    return size;
+}
+
+function normalizeBranch(value) {
+    const branch = String(value || 'main').trim();
+    if (!BRANCH_RE.test(branch) || branch.includes('..') || branch.includes('//') || branch.endsWith('/')) {
+        throw new InputError('branch 格式无效');
+    }
+    return branch;
+}
+
+function normalizeText(value, fallback, maxLength, field) {
+    const text = String(value || fallback).trim();
+    if (!text || text.length > maxLength) throw new InputError(`${field} 长度无效`);
+    return text;
+}
+
+function parseAmzDate(value) {
+    const match = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(value || '');
+    if (!match) return 0;
+    return Date.UTC(
+        Number(match[1]), Number(match[2]) - 1, Number(match[3]),
+        Number(match[4]), Number(match[5]), Number(match[6])
+    );
+}
+
+export function signedUrlExpiry(value) {
+    try {
+        const url = new URL(value);
+        const cloudfrontExpiry = Number(url.searchParams.get('Expires')) * 1000;
+        if (Number.isFinite(cloudfrontExpiry) && cloudfrontExpiry > 0) return cloudfrontExpiry;
+
+        const signedAt = parseAmzDate(url.searchParams.get('X-Amz-Date'));
+        const lifetime = Number(url.searchParams.get('X-Amz-Expires')) * 1000;
+        if (signedAt > 0 && Number.isFinite(lifetime) && lifetime > 0) return signedAt + lifetime;
+    } catch {
+        return 0;
+    }
+    return 0;
+}
+
+function safeHttpsUrl(value) {
+    const url = new URL(String(value || ''));
+    if (url.protocol !== 'https:' || url.username || url.password) {
+        throw new InputError('Hugging Face 返回了无效的上传地址');
+    }
+    return url.href;
+}
+
 /**
- * 协商 LFS 批量上传。
- *
- * 输入格式：
- * {
- *   repo: "clown145/gal",
- *   files: [
- *     { path: "shuizangyinhuo/data.xp3", size: 123456, sha256: "abc..." }
- *   ]
- * }
+ * 只向浏览器返回完成上传所必需的预签名字段。HF action.header 中的其他头不透传。
  */
+export function sanitizeUploadAction(action, expectedSize) {
+    if (!action || typeof action !== 'object') return null;
+
+    const href = safeHttpsUrl(action.href);
+    const header = action.header && typeof action.header === 'object' ? action.header : {};
+    const rawChunkSize = header.chunk_size;
+
+    if (rawChunkSize !== undefined && rawChunkSize !== null && rawChunkSize !== '') {
+        const chunkSize = Number(rawChunkSize);
+        if (!Number.isSafeInteger(chunkSize) || chunkSize <= 0) {
+            throw new InputError('Hugging Face multipart chunk_size 无效');
+        }
+
+        const parts = Object.entries(header)
+            .filter(([key]) => /^\d+$/.test(key))
+            .map(([key, url]) => ({ partNumber: Number(key), url: safeHttpsUrl(url) }))
+            .sort((a, b) => a.partNumber - b.partNumber);
+        const expectedParts = Math.ceil(expectedSize / chunkSize);
+
+        if (parts.length !== expectedParts || parts.some((part, index) => part.partNumber !== index + 1)) {
+            throw new InputError('Hugging Face multipart 分片列表不完整');
+        }
+
+        const expiries = [href, ...parts.map((part) => part.url)]
+            .map(signedUrlExpiry)
+            .filter((expiry) => expiry > 0);
+
+        return {
+            type: 'multipart',
+            href,
+            chunkSize,
+            parts,
+            expiresAt: expiries.length ? Math.min(...expiries) : 0
+        };
+    }
+
+    return {
+        type: 'basic',
+        href,
+        expiresAt: signedUrlExpiry(href)
+    };
+}
+
+export function mapLfsBatchObjects(files, returnedObjects) {
+    const byOid = new Map();
+    for (const object of Array.isArray(returnedObjects) ? returnedObjects : []) {
+        if (object && typeof object.oid === 'string') byOid.set(object.oid.toLowerCase(), object);
+    }
+
+    return files.map((file) => {
+        const returned = byOid.get(file.sha256);
+        if (!returned) {
+            return {
+                ...file,
+                exists: false,
+                upload: null,
+                verify: false,
+                error: { code: 502, message: 'Hugging Face Batch 响应缺少该对象' }
+            };
+        }
+
+        if (returned.error) {
+            return {
+                ...file,
+                exists: false,
+                upload: null,
+                verify: false,
+                error: {
+                    code: Number(returned.error.code) || 502,
+                    message: String(returned.error.message || 'Hugging Face 拒绝了该 LFS 对象')
+                }
+            };
+        }
+
+        if (returned.size !== undefined && Number(returned.size) !== file.size) {
+            return {
+                ...file,
+                exists: false,
+                upload: null,
+                verify: false,
+                error: { code: 502, message: 'Hugging Face Batch 返回的对象大小不一致' }
+            };
+        }
+
+        try {
+            const upload = sanitizeUploadAction(returned.actions?.upload, file.size);
+            return {
+                ...file,
+                exists: !upload,
+                upload,
+                verify: !!returned.actions?.verify,
+                error: null
+            };
+        } catch (err) {
+            return {
+                ...file,
+                exists: false,
+                upload: null,
+                verify: false,
+                error: { code: 502, message: err.message || 'Hugging Face 上传凭证无效' }
+            };
+        }
+    });
+}
+
+function normalizePrepareFiles(rawFiles) {
+    if (!Array.isArray(rawFiles) || rawFiles.length === 0) throw new InputError('files 列表不能为空');
+    if (rawFiles.length > HF_LFS_BATCH_LIMIT) {
+        throw new InputError(`单次最多准备 ${HF_LFS_BATCH_LIMIT} 个文件`);
+    }
+
+    const sizesByOid = new Map();
+    return rawFiles.map((file) => {
+        const normalized = {
+            path: normalizeHfPath(file?.path),
+            sha256: normalizeOid(file?.sha256),
+            size: normalizeFileSize(file?.size)
+        };
+        const knownSize = sizesByOid.get(normalized.sha256);
+        if (knownSize !== undefined && knownSize !== normalized.size) {
+            throw new InputError('相同 sha256 的文件大小不一致');
+        }
+        sizesByOid.set(normalized.sha256, normalized.size);
+        return normalized;
+    });
+}
+
+async function readJson(request) {
+    try {
+        return await request.json();
+    } catch {
+        throw new InputError('Invalid JSON body');
+    }
+}
+
+function upstreamMessage(response, text, operation) {
+    const detail = String(text || '').slice(0, 2000);
+    return `${operation} (${response.status})${detail ? `: ${detail}` : ''}`;
+}
+
 async function handlePrepareUpload(request, env) {
     const token = getHfToken(env);
     if (!token) {
-        return error(503, '服务端未配置 HF_TOKEN，无法上传到 Hugging Face。请在 Cloudflare Worker 中配置 Secret: HF_TOKEN');
+        return error(503, '服务端未配置 HF_TOKEN，无法上传到 Hugging Face');
     }
 
     let body;
+    let repo;
+    let files;
     try {
-        body = await request.json();
-    } catch {
-        return error(400, 'Invalid JSON body');
+        body = await readJson(request);
+        repo = normalizeHfRepo(body?.repo, defaultRepo(env));
+        files = normalizePrepareFiles(body?.files);
+    } catch (err) {
+        if (err instanceof InputError) return error(400, err.message);
+        throw err;
     }
-
-    const defaultOwner = env.HF_DEFAULT_OWNER || 'clown145';
-    const defaultRepo = env.HF_DEFAULT_REPO || 'gal';
-    const repo = (body?.repo || `${defaultOwner}/${defaultRepo}`).trim();
-    const files = Array.isArray(body?.files) ? body.files : [];
-
-    if (!files.length) {
-        return error(400, 'files 列表不能为空');
-    }
-
-    // 格式化 objects
-    const objects = files.map((f) => ({
-        oid: String(f.sha256).toLowerCase().trim(),
-        size: Number(f.size)
-    }));
 
     const lfsBatchUrl = `https://huggingface.co/datasets/${repo}.git/info/lfs/objects/batch`;
     const payload = {
         operation: 'upload',
-        transfers: ['basic'],
-        objects: objects
+        transfers: ['basic', 'multipart'],
+        hash_algo: 'sha256',
+        objects: files.map((file) => ({ oid: file.sha256, size: file.size }))
     };
 
     let hfRes;
@@ -69,61 +281,44 @@ async function handlePrepareUpload(request, env) {
             body: JSON.stringify(payload)
         });
     } catch (err) {
-        return error(502, '连接 Hugging Face LFS API 失败: ' + err.message);
+        return error(502, `连接 Hugging Face LFS API 失败: ${err.message}`);
     }
 
     if (!hfRes.ok) {
-        const text = await hfRes.text();
-        return error(hfRes.status, `Hugging Face LFS Batch 失败 (${hfRes.status}): ${text}`);
+        return error(hfRes.status, upstreamMessage(hfRes, await hfRes.text(), 'Hugging Face LFS Batch 失败'));
     }
 
-    const result = await hfRes.json();
-    const returnedObjects = result.objects || [];
-
-    // 将返回结果与原始文件路径一一关联
-    const mapped = files.map((f, i) => {
-        const returned = returnedObjects[i] || {};
-        const isExisting = !returned.actions || !returned.actions.upload;
-        return {
-            path: f.path,
-            sha256: f.sha256,
-            size: f.size,
-            exists: isExisting, // true 表示云端已存在（可秒传）
-            uploadAction: returned.actions?.upload || null
-        };
-    });
+    let result;
+    try {
+        result = await hfRes.json();
+    } catch {
+        return error(502, 'Hugging Face LFS Batch 返回了无效 JSON');
+    }
 
     return json({
         ok: true,
-        repo: repo,
-        objects: mapped
+        repo,
+        requestId: hfRes.headers.get('X-Request-Id') || '',
+        objects: mapLfsBatchObjects(files, result.objects)
     });
 }
 
-/**
- * 验证 LFS 对象上传完成（调用 Hugging Face Verify API）。
- */
 async function handleVerifyUpload(request, env) {
     const token = getHfToken(env);
-    if (!token) {
-        return error(503, '服务端未配置 HF_TOKEN');
-    }
+    if (!token) return error(503, '服务端未配置 HF_TOKEN');
 
     let body;
+    let repo;
+    let oid;
+    let size;
     try {
-        body = await request.json();
-    } catch {
-        return error(400, 'Invalid JSON body');
-    }
-
-    const defaultOwner = env.HF_DEFAULT_OWNER || 'clown145';
-    const defaultRepo = env.HF_DEFAULT_REPO || 'gal';
-    const repo = (body?.repo || `${defaultOwner}/${defaultRepo}`).trim();
-    const oid = String(body?.oid || '').toLowerCase().trim();
-    const size = Number(body?.size || 0);
-
-    if (!oid || size <= 0) {
-        return error(400, 'oid 和 size 不能为空且 size 必须大于 0');
+        body = await readJson(request);
+        repo = normalizeHfRepo(body?.repo, defaultRepo(env));
+        oid = normalizeOid(body?.oid);
+        size = normalizeFileSize(body?.size);
+    } catch (err) {
+        if (err instanceof InputError) return error(400, err.message);
+        throw err;
     }
 
     const verifyUrl = `https://huggingface.co/datasets/${repo}.git/info/lfs/objects/verify`;
@@ -139,110 +334,88 @@ async function handleVerifyUpload(request, env) {
             body: JSON.stringify({ oid, size })
         });
     } catch (err) {
-        return error(502, 'LFS Verify 请求失败: ' + err.message);
+        return error(502, `LFS Verify 请求失败: ${err.message}`);
     }
 
     if (!hfRes.ok) {
-        const text = await hfRes.text();
-        return error(hfRes.status, `LFS Verify 失败 (${hfRes.status}): ${text}`);
+        return error(hfRes.status, upstreamMessage(hfRes, await hfRes.text(), 'LFS Verify 失败'));
     }
-
     return json({ ok: true });
 }
 
-/**
- * 提交 Git Commit（采用 Hugging Face 规范的 application/x-ndjson 格式）。
- *
- * 输入格式：
- * {
- *   repo: "clown145/gal",
- *   branch: "main",
- *   summary: "Upload 水葬银货 (shuizangyinhuo)",
- *   operations: [
- *     { operation: "lfsFile", path: "shuizangyinhuo/data.xp3", oid: "<sha256>", size: 123456 },
- *     { operation: "file", path: "shuizangyinhuo/manifest.json", content: "<base64_encoded>", encoding: "base64" }
- *   ]
- * }
- */
+function normalizeCommitOperations(rawOperations) {
+    if (!Array.isArray(rawOperations) || rawOperations.length === 0) {
+        throw new InputError('operations 列表不能为空');
+    }
+    if (rawOperations.length > HF_COMMIT_OPERATION_LIMIT) {
+        throw new InputError(`单次 Commit 最多 ${HF_COMMIT_OPERATION_LIMIT} 个操作`);
+    }
+
+    return rawOperations.map((operation) => {
+        const key = operation?.operation || operation?.key;
+        const value = operation?.value || operation || {};
+        const path = normalizeHfPath(operation?.path || value.path);
+
+        if (key === 'lfsFile') {
+            return {
+                key,
+                value: {
+                    path,
+                    algo: 'sha256',
+                    oid: normalizeOid(operation?.oid || operation?.content || value.oid),
+                    size: normalizeFileSize(operation?.size ?? value.size)
+                }
+            };
+        }
+
+        if (key === 'file') {
+            const content = operation?.content ?? value.content;
+            const encoding = operation?.encoding || value.encoding || 'base64';
+            if (typeof content !== 'string' || !['base64', 'utf-8'].includes(encoding)) {
+                throw new InputError(`普通文件 ${path} 的 content/encoding 无效`);
+            }
+            return { key, value: { path, content, encoding } };
+        }
+
+        if (key === 'deletedFile' || key === 'deletedFolder') {
+            return { key, value: { path } };
+        }
+
+        throw new InputError(`不支持的 Commit 操作: ${String(key || '')}`);
+    });
+}
+
+export function buildCommitNdjson({ summary, description, operations }) {
+    return [
+        JSON.stringify({ key: 'header', value: { summary, description } }),
+        ...operations.map((operation) => JSON.stringify(operation))
+    ].join('\n') + '\n';
+}
+
 async function handleCommit(request, env) {
     const token = getHfToken(env);
-    if (!token) {
-        return error(503, '服务端未配置 HF_TOKEN');
-    }
+    if (!token) return error(503, '服务端未配置 HF_TOKEN');
 
     let body;
+    let repo;
+    let branch;
+    let summary;
+    let description;
+    let operations;
     try {
-        body = await request.json();
-    } catch {
-        return error(400, 'Invalid JSON body');
+        body = await readJson(request);
+        repo = normalizeHfRepo(body?.repo, defaultRepo(env));
+        branch = normalizeBranch(body?.branch || 'main');
+        summary = normalizeText(body?.summary, 'Upload game assets via WebUI', 512, 'summary');
+        description = String(body?.description || '').trim().slice(0, 10000);
+        operations = normalizeCommitOperations(body?.operations);
+    } catch (err) {
+        if (err instanceof InputError) return error(400, err.message);
+        throw err;
     }
 
-    const defaultOwner = env.HF_DEFAULT_OWNER || 'clown145';
-    const defaultRepo = env.HF_DEFAULT_REPO || 'gal';
-    const repo = (body?.repo || `${defaultOwner}/${defaultRepo}`).trim();
-    const branch = (body?.branch || 'main').trim();
-    const summary = (body?.summary || 'Upload game assets via WebUI').trim();
-    const description = (body?.description || '').trim();
-    const operations = Array.isArray(body?.operations) ? body.operations : [];
-
-    if (!operations.length) {
-        return error(400, 'operations 列表不能为空');
-    }
-
-    // 将 operations 转换为 Hugging Face 规范的 NDJSON (application/x-ndjson)
-    const ndjsonLines = [];
-
-    // 1. Header 行
-    ndjsonLines.push(JSON.stringify({
-        key: 'header',
-        value: {
-            summary: summary,
-            description: description
-        }
-    }));
-
-    // 2. 逐个文件操作行
-    for (const op of operations) {
-        if (op.operation === 'lfsFile' || op.key === 'lfsFile') {
-            const path = op.path || op.value?.path;
-            const oid = (op.oid || op.content || op.value?.oid || '').toLowerCase().trim();
-            const size = Number(op.size || op.value?.size || 0);
-            ndjsonLines.push(JSON.stringify({
-                key: 'lfsFile',
-                value: {
-                    path: path,
-                    algo: 'sha256',
-                    oid: oid,
-                    size: size
-                }
-            }));
-        } else if (op.operation === 'file' || op.key === 'file') {
-            const path = op.path || op.value?.path;
-            const content = op.content || op.value?.content;
-            const encoding = op.encoding || op.value?.encoding || 'base64';
-            ndjsonLines.push(JSON.stringify({
-                key: 'file',
-                value: {
-                    path: path,
-                    content: content,
-                    encoding: encoding
-                }
-            }));
-        } else if (op.operation === 'deletedFile' || op.key === 'deletedFile') {
-            ndjsonLines.push(JSON.stringify({
-                key: 'deletedFile',
-                value: { path: op.path || op.value?.path }
-            }));
-        } else if (op.operation === 'deletedFolder' || op.key === 'deletedFolder') {
-            ndjsonLines.push(JSON.stringify({
-                key: 'deletedFolder',
-                value: { path: op.path || op.value?.path }
-            }));
-        }
-    }
-
-    const ndjsonBody = ndjsonLines.join('\n') + '\n';
-    const commitUrl = `https://huggingface.co/api/datasets/${repo}/commit/${branch}`;
+    const ndjsonBody = buildCommitNdjson({ summary, description, operations });
+    const commitUrl = `https://huggingface.co/api/datasets/${repo}/commit/${encodeURIComponent(branch)}`;
 
     let hfRes;
     try {
@@ -255,40 +428,31 @@ async function handleCommit(request, env) {
             body: ndjsonBody
         });
     } catch (err) {
-        return error(502, '连接 Hugging Face Commit API 失败: ' + err.message);
+        return error(502, `连接 Hugging Face Commit API 失败: ${err.message}`);
     }
 
     if (!hfRes.ok) {
-        const text = await hfRes.text();
-        return error(hfRes.status, `Hugging Face Commit 失败 (${hfRes.status}): ${text}`);
+        return error(hfRes.status, upstreamMessage(hfRes, await hfRes.text(), 'Hugging Face Commit 失败'));
     }
 
-    const result = await hfRes.json();
+    let result;
+    try {
+        result = await hfRes.json();
+    } catch {
+        return error(502, 'Hugging Face Commit 返回了无效 JSON');
+    }
     return json({
         ok: true,
-        repo: repo,
+        repo,
         commitUrl: result.commitUrl || `https://huggingface.co/datasets/${repo}/commit/${result.commitOid || branch}`,
         commitOid: result.commitOid || ''
     });
 }
 
-/**
- * 后台 Hugging Face 上传路由调度。
- */
 export async function handleHfUploadApi(request, env, ctx, segments) {
     const [action] = segments;
-
-    if (action === 'prepare-upload' && request.method === 'POST') {
-        return handlePrepareUpload(request, env);
-    }
-
-    if (action === 'verify-upload' && request.method === 'POST') {
-        return handleVerifyUpload(request, env);
-    }
-
-    if (action === 'commit' && request.method === 'POST') {
-        return handleCommit(request, env);
-    }
-
+    if (action === 'prepare-upload' && request.method === 'POST') return handlePrepareUpload(request, env);
+    if (action === 'verify-upload' && request.method === 'POST') return handleVerifyUpload(request, env);
+    if (action === 'commit' && request.method === 'POST') return handleCommit(request, env);
     return error(404, 'Unknown HF upload endpoint');
 }

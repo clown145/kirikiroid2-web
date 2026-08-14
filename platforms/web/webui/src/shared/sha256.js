@@ -125,7 +125,8 @@ export class Sha256Stream {
 
 /**
  * 分块计算文件 SHA-256。
- * 小文件走原生 WebCrypto，大文件按 4MB 分片流式读取，杜绝 Windows 内存暴增与权限丢失。
+ * 小文件走原生 WebCrypto，大文件按 4 MiB 读取块增量计算，避免一次载入整个文件。
+ * 这里的读取块只服务于本地哈希计算，与网络上传是否分片无关。
  */
 export async function computeFileSha256(file, onProgress) {
     if (file.size <= 16 * 1024 * 1024) {
@@ -137,7 +138,7 @@ export async function computeFileSha256(file, onProgress) {
     }
 
     const hasher = new Sha256Stream();
-    const chunkSize = 4 * 1024 * 1024; // 4MB 分片
+    const chunkSize = 4 * 1024 * 1024; // 4 MiB 本地哈希读取块，不是网络上传分片
     let offset = 0;
     const total = file.size;
 

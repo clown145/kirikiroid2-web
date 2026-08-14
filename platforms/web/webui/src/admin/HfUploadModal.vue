@@ -1,33 +1,65 @@
 <script setup>
-import { ref, computed, watch, onUnmounted } from 'vue';
+import { computed, onUnmounted, ref, shallowRef, watch } from 'vue';
 import {
-    CheckCircle2, Clock, CloudUpload, Copy, Folder, FolderOpen,
-    Gauge, Package, Plus, Sparkles, X
+    AlertCircle, CheckCircle2, Clock, CloudUpload, Copy, Folder, FolderOpen,
+    Gauge, Package, Pause, Play, Plus, RotateCcw, Sparkles, Square, Trash2, X
 } from '@lucide/vue';
 import { toast } from '../shared/toast.js';
 import { toPinyinSlug } from '../shared/pinyin.js';
-import { computeFileSha256 } from '../shared/sha256.js';
+import { FileHasher } from '../shared/fileHasher.js';
+import {
+    DEFAULT_UPLOAD_CONCURRENCY,
+    UploadActionExpiredError,
+    UploadCancelledError,
+    UploadControl,
+    UploadTaskPool,
+    fetchWithUploadRetry,
+    isUploadActionExpired,
+    uploadBasicFile,
+    uploadMultipartFile
+} from '../shared/hfUploadClient.js';
+import {
+    deleteUploadSession,
+    getLatestUploadSession,
+    listUploadFiles,
+    newUploadSessionId,
+    patchUploadFile,
+    patchUploadSession,
+    saveCompletedPart,
+    saveUploadFiles,
+    saveUploadSession
+} from '../shared/hfUploadSession.js';
+import { UploadSpeedTracker } from '../shared/uploadSpeed.js';
+
+const HASH_BATCH_FILES = 20;
+const HASH_BATCH_BYTES = 256 * 1024 * 1024;
+const MAX_IN_FLIGHT_BATCHES = 2;
+const ACTION_FALLBACK_TTL_MS = 25 * 60 * 1000;
+const MAX_COMMIT_FILES = 9999;
 
 const props = defineProps({
     show: { type: Boolean, default: false }
 });
-
 const emit = defineEmits(['close', 'complete']);
 
-// --- 状态流转: 'select' | 'uploading' | 'completed' ------------------
 const step = ref('select');
-
+const runState = ref('idle'); // idle | running | paused | stopped | failed
+const phase = ref('idle'); // hashing | preparing | uploading | verifying | committing
 const targetRepo = ref('clown145/gal');
 const gameTitle = ref('');
 const gameSlug = ref('');
-const files = ref([]);          // [{ name, handle, file, size, sha256, status, progress, exists, uploadAction }]
+const files = ref([]);
 const hasExistingManifest = ref(false);
-const generatedManifest = ref(null);
+const generatedManifest = ref('');
+const resumeCandidate = shallowRef(null);
+const errorMessage = ref('');
 
-const uploading = ref(false);
 const totalBytes = ref(0);
 const uploadedBytes = ref(0);
-const currentSpeed = ref('0 B/s');
+const hashingBytes = ref(0);
+const totalHashBytes = ref(0);
+const wireBytes = ref(0);
+const currentSpeed = ref('--');
 const timeRemaining = ref('--');
 const currentTaskMsg = ref('');
 const completedCommitUrl = ref('');
@@ -37,467 +69,929 @@ const dirInput = ref(null);
 const isDragging = ref(false);
 
 let currentDirHandle = null;
+let sourceKind = 'input';
+let sessionId = '';
+let pendingResumeSession = null;
+let currentControl = null;
+let currentPool = null;
+let runAbortController = null;
+let pipelinePromise = null;
+let stoppingForLater = false;
 let speedTimer = null;
-let lastBytes = 0;
-let lastTime = Date.now();
+let persistenceEnabled = true;
+let persistenceWarningShown = false;
 
-// --- 格式化辅助 ------------------------------------------------------
+const speedTracker = new UploadSpeedTracker();
+const fileHasher = new FileHasher();
 
 function formatBytes(bytes) {
-    if (!bytes || bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
+    const value = Number(bytes) || 0;
+    if (value <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+    return `${(value / (1024 ** index)).toFixed(2)} ${units[index]}`;
 }
 
-const overallPercent = computed(() => {
-    if (totalBytes.value === 0) return 0;
-    return Math.min(100, Math.round((uploadedBytes.value / totalBytes.value) * 100));
-});
+function formatDuration(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return '--';
+    const rounded = Math.ceil(seconds);
+    if (rounded >= 3600) return `${Math.floor(rounded / 3600)} 小时 ${Math.floor((rounded % 3600) / 60)} 分`;
+    if (rounded >= 60) return `${Math.floor(rounded / 60)} 分 ${rounded % 60} 秒`;
+    return `${rounded} 秒`;
+}
 
-// --- 选择文件夹与解析 ------------------------------------------------
+const overallPercent = computed(() => totalBytes.value
+    ? Math.min(100, Math.round((uploadedBytes.value / totalBytes.value) * 100))
+    : (files.value.length && files.value.every((item) => ['done', 'dedup'].includes(item.status)) ? 100 : 0));
+const hashPercent = computed(() => totalHashBytes.value
+    ? Math.min(100, Math.round((hashingBytes.value / totalHashBytes.value) * 100))
+    : 0);
+const phaseText = computed(() => ({
+    idle: '等待开始',
+    hashing: '计算 SHA-256',
+    preparing: '申请上传通道',
+    uploading: '上传文件',
+    verifying: '校验对象',
+    committing: '创建 Commit'
+}[phase.value] || phase.value));
 
-async function onPickFolder() {
-    if (typeof window.showDirectoryPicker === 'function') {
-        try {
-            const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
-            currentDirHandle = dirHandle;
-            await processDirectoryHandle(dirHandle);
-        } catch (err) {
-            if (err?.name !== 'AbortError') {
-                // 若 showDirectoryPicker 出错，降级触发普通文件 input
-                dirInput.value?.click();
-            }
+async function persist(operation) {
+    if (!persistenceEnabled) return;
+    try {
+        await operation();
+    } catch (err) {
+        persistenceEnabled = false;
+        if (!persistenceWarningShown) {
+            persistenceWarningShown = true;
+            toast.warn(`无法保存断点状态，本次页面关闭后不能恢复：${err.message}`);
         }
-    } else {
-        dirInput.value?.click();
     }
+}
+
+function buildFileRecord(name, file, handle = null) {
+    return {
+        name: name.replace(/\\/g, '/'),
+        handle,
+        file,
+        size: file.size,
+        lastModified: file.lastModified,
+        sha256: '',
+        status: 'pending',
+        progress: 0,
+        hashProgress: 0,
+        uploaded: 0,
+        uploadedComplete: false,
+        verified: false,
+        upload: null,
+        parts: {},
+        retryCount: 0,
+        error: ''
+    };
 }
 
 async function scanHandle(dirHandle, relativePath = '') {
-    let list = [];
+    let result = [];
     for await (const [name, handle] of dirHandle.entries()) {
-        if (name === '.DS_Store' || name === 'Thumbs.db' || name.toLowerCase().endsWith('.exe')) {
-            continue;
-        }
-        const itemPath = relativePath ? `${relativePath}/${name}` : name;
+        if (name === '.DS_Store' || name === 'Thumbs.db' || name.toLowerCase().endsWith('.exe')) continue;
+        const path = relativePath ? `${relativePath}/${name}` : name;
         if (handle.kind === 'directory') {
-            list = list.concat(await scanHandle(handle, itemPath));
+            result = result.concat(await scanHandle(handle, path));
         } else if (handle.kind === 'file') {
-            const file = await handle.getFile();
-            list.push({
-                name: itemPath.replace(/\\/g, '/'),
-                handle: handle,
-                file: file,
-                size: file.size,
-                status: 'pending', // 'pending' | 'hashing' | 'uploading' | 'done' | 'dedup' | 'error'
-                progress: 0
-            });
+            result.push(buildFileRecord(path, await handle.getFile(), handle));
         }
     }
-    return list;
+    return result;
 }
 
-async function processDirectoryHandle(dirHandle) {
-    const rawTitle = dirHandle.name || 'Game';
-    gameTitle.value = rawTitle;
-    gameSlug.value = toPinyinSlug(rawTitle);
-
-    toast.info('正在扫描文件...');
-    const scanned = await scanHandle(dirHandle);
-    setupScannedFiles(scanned);
+function createManifest(resources) {
+    return JSON.stringify(resources.map((file) => ({ name: file.name, size: file.size })), null, 2);
 }
 
-function onInputFolderSelect(e) {
-    const inputFiles = Array.from(e.target.files || []);
-    e.target.value = '';
-    if (!inputFiles.length) return;
-
-    // 从第一个文件路径提取文件夹根名
-    const firstRel = inputFiles[0].webkitRelativePath || '';
-    const rootName = firstRel.split('/')[0] || 'Game';
-    gameTitle.value = rootName;
-    gameSlug.value = toPinyinSlug(rootName);
-
-    const scanned = [];
-    for (const f of inputFiles) {
-        const name = f.name;
-        if (name === '.DS_Store' || name === 'Thumbs.db' || name.toLowerCase().endsWith('.exe')) {
-            continue;
-        }
-        const relPath = (f.webkitRelativePath || f.name).replace(/^[^/]+\//, '');
-        scanned.push({
-            name: relPath.replace(/\\/g, '/'),
-            file: f,
-            size: f.size,
-            status: 'pending',
-            progress: 0
-        });
-    }
-
-    setupScannedFiles(scanned);
+function completedPartBytes(state) {
+    if (state.status === 'done' || state.status === 'dedup' || state.uploadedComplete) return state.size;
+    if (state.upload?.type !== 'multipart') return 0;
+    return Object.keys(state.parts || {}).reduce((total, key) => {
+        const partNumber = Number(key);
+        const start = (partNumber - 1) * state.upload.chunkSize;
+        return total + Math.max(0, Math.min(state.upload.chunkSize, state.size - start));
+    }, 0);
 }
 
-function setupScannedFiles(scanned) {
-    if (!scanned.length) {
-        toast.error('未在选择的文件夹中发现有效游戏资源');
+async function setupScannedFiles(scanned, { resume = null } = {}) {
+    if (!scanned.length) throw new Error('未在选择的文件夹中发现有效游戏资源');
+    hasExistingManifest.value = scanned.some((file) => file.name.toLowerCase() === 'manifest.json');
+    const resources = scanned
+        .filter((file) => file.name.toLowerCase() !== 'manifest.json')
+        .sort((a, b) => a.name.localeCompare(b.name));
+    if (!resources.length) throw new Error('目录中只有 manifest.json，没有可上传资源');
+
+    generatedManifest.value = createManifest(resources);
+    totalBytes.value = resources.reduce((total, file) => total + file.size, 0);
+    totalHashBytes.value = totalBytes.value;
+    hashingBytes.value = 0;
+    uploadedBytes.value = 0;
+
+    if (!resume) {
+        files.value = resources;
+        step.value = 'select';
+        runState.value = 'idle';
         return;
     }
 
-    const manifestEntry = scanned.find((f) => f.name.toLowerCase() === 'manifest.json');
-    hasExistingManifest.value = !!manifestEntry;
+    const storedFiles = await listUploadFiles(resume.id);
+    const storedByPath = new Map(storedFiles.map((file) => [file.path, file]));
+    if (storedFiles.length !== resources.length) {
+        throw new Error('目录文件数量已变化，不能套用旧断点');
+    }
 
-    files.value = scanned;
-    totalBytes.value = scanned.reduce((acc, f) => acc + f.size, 0);
-    step.value = 'select';
+    for (const file of resources) {
+        const state = storedByPath.get(file.name);
+        if (!state || state.size !== file.size || state.lastModified !== file.lastModified) {
+            throw new Error(`文件已变化，不能继续旧断点：${file.name}`);
+        }
+        Object.assign(file, {
+            sha256: state.sha256 || '',
+            status: ['done', 'dedup'].includes(state.status) ? state.status : 'pending',
+            progress: ['done', 'dedup'].includes(state.status) ? 100 : 0,
+            hashProgress: state.sha256 ? 100 : 0,
+            uploadedComplete: !!state.uploadedComplete,
+            verified: !!state.verified,
+            upload: state.upload || null,
+            parts: state.parts || {},
+            retryCount: state.retryCount || 0,
+            error: ''
+        });
+        file.uploaded = completedPartBytes({ ...state, size: file.size });
+        hashingBytes.value += file.sha256 ? file.size : 0;
+        uploadedBytes.value += file.uploaded;
+    }
+
+    files.value = resources;
+    sessionId = resume.id;
+    targetRepo.value = resume.repo;
+    gameTitle.value = resume.title;
+    gameSlug.value = resume.slug;
+    generatedManifest.value = resume.manifest || generatedManifest.value;
+    phase.value = resume.phase || 'hashing';
+    step.value = 'uploading';
+    runState.value = 'stopped';
+    currentTaskMsg.value = '断点已载入，可以继续上传';
+    resumeCandidate.value = resume;
 }
 
-function onDrop(e) {
+async function onPickFolder() {
+    if (typeof window.showDirectoryPicker !== 'function') {
+        dirInput.value?.click();
+        return;
+    }
+    try {
+        const handle = await window.showDirectoryPicker({ mode: 'read' });
+        currentDirHandle = handle;
+        sourceKind = 'fsa';
+        gameTitle.value = handle.name || 'Game';
+        gameSlug.value = toPinyinSlug(gameTitle.value);
+        toast.info('正在扫描文件...');
+        await setupScannedFiles(await scanHandle(handle));
+    } catch (err) {
+        if (err?.name !== 'AbortError') toast.error(err.message || '读取文件夹失败');
+    }
+}
+
+async function onInputFolderSelect(event) {
+    const inputFiles = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (!inputFiles.length) return;
+
+    const firstPath = inputFiles[0].webkitRelativePath || '';
+    const rootName = firstPath.split('/')[0] || 'Game';
+    const scanned = inputFiles
+        .filter((file) => file.name !== '.DS_Store' && file.name !== 'Thumbs.db' && !file.name.toLowerCase().endsWith('.exe'))
+        .map((file) => buildFileRecord(
+            (file.webkitRelativePath || file.name).replace(/^[^/]+\//, ''),
+            file
+        ));
+    sourceKind = 'input';
+    currentDirHandle = null;
+
+    try {
+        if (pendingResumeSession) {
+            const resume = pendingResumeSession;
+            pendingResumeSession = null;
+            await setupScannedFiles(scanned, { resume });
+        } else {
+            gameTitle.value = rootName;
+            gameSlug.value = toPinyinSlug(rootName);
+            await setupScannedFiles(scanned);
+        }
+    } catch (err) {
+        toast.error(err.message);
+    }
+}
+
+function onDrop() {
     isDragging.value = false;
-    // 降级支持
-    const items = e.dataTransfer?.items;
-    if (items && items.length) {
-        toast.info('请点击“选择本地游戏文件夹”以获得完整目录结构');
+    toast.info('请使用文件夹选择器以保留完整目录结构');
+}
+
+async function resumePreviousUpload() {
+    const resume = resumeCandidate.value;
+    if (!resume) return;
+    try {
+        if (resume.sourceKind === 'fsa' && resume.directoryHandle) {
+            const permission = await resume.directoryHandle.requestPermission({ mode: 'read' });
+            if (permission !== 'granted') throw new Error('未获得文件夹读取权限');
+            currentDirHandle = resume.directoryHandle;
+            sourceKind = 'fsa';
+            await setupScannedFiles(await scanHandle(currentDirHandle), { resume });
+        } else {
+            pendingResumeSession = resume;
+            dirInput.value?.click();
+        }
+    } catch (err) {
+        toast.error(`无法恢复上传：${err.message}`);
     }
 }
 
-// --- 获取当前有效文件对象 --------------------------------------------
+async function discardResume() {
+    const resume = resumeCandidate.value;
+    if (!resume) return;
+    try {
+        await deleteUploadSession(resume.id);
+        resumeCandidate.value = null;
+        toast.info('已删除旧上传断点');
+    } catch (err) {
+        toast.error(`删除上传断点失败：${err.message}`);
+    }
+}
+
 async function getActiveFile(item) {
-    if (item.handle && typeof item.handle.getFile === 'function') {
-        try {
-            return await item.handle.getFile();
-        } catch {
-            return item.file;
-        }
+    const file = item.handle ? await item.handle.getFile() : item.file;
+    if (!file || file.size !== item.size || file.lastModified !== item.lastModified) {
+        throw new Error(`文件在校验后发生变化，请重新选择目录：${item.name}`);
     }
-    return item.file;
+    return file;
 }
 
-// --- 上传逻辑 --------------------------------------------------------
+function updateItemUploaded(item, loaded) {
+    const value = Math.max(0, Math.min(Number(loaded) || 0, item.size));
+    uploadedBytes.value += value - item.uploaded;
+    item.uploaded = value;
+    item.progress = item.size ? Math.round((value / item.size) * 100) : 100;
+}
 
-function uploadToS3(uploadAction, file, onProgress) {
-    return new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('PUT', uploadAction.href);
-        if (uploadAction.header) {
-            for (const [k, v] of Object.entries(uploadAction.header)) {
-                xhr.setRequestHeader(k, v);
-            }
-        }
-        xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable && onProgress) {
-                onProgress(e.loaded, e.total);
-            }
-        };
-        xhr.onload = () => {
-            if (xhr.status >= 200 && xhr.status < 300) {
-                resolve();
-            } else {
-                reject(new Error(`S3 上传失败 (${xhr.status}): ${xhr.responseText || xhr.statusText}`));
-            }
-        };
-        xhr.onerror = () => reject(new Error('网络中断，上传失败'));
-        xhr.send(file);
-    });
+function recordWireBytes(delta) {
+    wireBytes.value += delta;
+    speedTracker.record(wireBytes.value);
 }
 
 function startSpeedMonitor() {
-    lastBytes = 0;
-    lastTime = Date.now();
+    stopSpeedMonitor();
+    speedTracker.reset();
+    wireBytes.value = 0;
+    currentSpeed.value = '--';
+    timeRemaining.value = '--';
     speedTimer = setInterval(() => {
-        const now = Date.now();
-        const timeDiff = (now - lastTime) / 1000;
-        if (timeDiff > 0.5) {
-            const bytesDiff = uploadedBytes.value - lastBytes;
-            const speed = bytesDiff / timeDiff;
-            currentSpeed.value = formatBytes(speed) + '/s';
-
-            const remainBytes = totalBytes.value - uploadedBytes.value;
-            if (speed > 0 && remainBytes > 0) {
-                const remainSec = Math.round(remainBytes / speed);
-                if (remainSec > 60) {
-                    timeRemaining.value = `${Math.floor(remainSec / 60)} 分 ${remainSec % 60} 秒`;
-                } else {
-                    timeRemaining.value = `${remainSec} 秒`;
-                }
-            } else {
-                timeRemaining.value = '--';
-            }
-
-            lastBytes = uploadedBytes.value;
-            lastTime = now;
+        if (runState.value === 'paused') {
+            currentSpeed.value = '已暂停';
+            timeRemaining.value = '--';
+            return;
         }
+        const speed = speedTracker.getSpeed();
+        currentSpeed.value = speed > 0 ? `${formatBytes(speed)}/s` : (wireBytes.value ? '0 B/s' : '--');
+        const remaining = Math.max(0, totalBytes.value - uploadedBytes.value);
+        timeRemaining.value = speed > 0 && remaining > 0 ? formatDuration(remaining / speed) : '--';
     }, 800);
 }
 
 function stopSpeedMonitor() {
-    if (speedTimer) {
-        clearInterval(speedTimer);
-        speedTimer = null;
-    }
+    if (speedTimer) clearInterval(speedTimer);
+    speedTimer = null;
 }
 
-async function startUpload() {
-    if (!files.value.length) return;
-    const slug = gameSlug.value.trim();
-    if (!slug) {
-        toast.error('目标拼音目录名不能为空');
+function retryNotice(item, label) {
+    return ({ attempt, delay, error }) => {
+        item.retryCount++;
+        item.error = `${label}失败，${Math.ceil(delay / 1000)} 秒后第 ${attempt} 次尝试`;
+        currentTaskMsg.value = `${item.name} 正在重试：${error.message}`;
+    };
+}
+
+async function requestJson(url, init, item = null, label = '请求') {
+    const response = await fetchWithUploadRetry(url, init, {
+        control: currentControl,
+        onRetry: item ? retryNotice(item, label) : ({ attempt }) => {
+            currentTaskMsg.value = `${label}失败，正在进行第 ${attempt} 次尝试`;
+        }
+    });
+    return response.json();
+}
+
+async function prepareItems(items) {
+    if (!items.length) return new Map();
+    phase.value = 'preparing';
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        currentTaskMsg.value = `正在申请 ${items.length} 个 LFS 上传通道`;
+        const result = await requestJson('/api/admin/hf/prepare-upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                repo: targetRepo.value.trim(),
+                files: items.map((item) => ({
+                    path: `${gameSlug.value}/${item.name}`,
+                    size: item.size,
+                    sha256: item.sha256
+                }))
+            })
+        }, null, 'LFS Batch');
+        const objects = result.objects || [];
+        const temporaryErrors = objects.filter((object) => {
+            const code = Number(object.error?.code) || 0;
+            return code === 408 || code === 425 || code === 429 || code >= 500;
+        });
+        if (!temporaryErrors.length || attempt === 3) {
+            return new Map(objects.map((object) => [object.path, object]));
+        }
+        for (const object of temporaryErrors) {
+            const item = items.find((candidate) => `${gameSlug.value}/${candidate.name}` === object.path);
+            if (item) item.retryCount++;
+        }
+        currentTaskMsg.value = `LFS Batch 返回临时错误，正在第 ${attempt + 1} 次尝试`;
+        await currentControl.delay(500 * (2 ** (attempt - 1)));
+    }
+    return new Map();
+}
+
+function normalizeUploadAction(upload) {
+    if (!upload) return null;
+    return {
+        ...upload,
+        expiresAt: upload.expiresAt || (Date.now() + ACTION_FALLBACK_TTL_MS)
+    };
+}
+
+function isSameUploadSession(previous, next) {
+    if (!previous || !next || previous.type !== next.type || previous.href !== next.href) return false;
+    if (previous.type !== 'multipart') return true;
+    if (previous.chunkSize !== next.chunkSize || previous.parts?.length !== next.parts?.length) return false;
+    return previous.parts.every((part, index) =>
+        part.partNumber === next.parts[index]?.partNumber && part.url === next.parts[index]?.url);
+}
+
+async function verifyItem(item) {
+    phase.value = 'verifying';
+    item.status = 'verifying';
+    currentTaskMsg.value = `正在校验 LFS 对象：${item.name}`;
+    await requestJson('/api/admin/hf/verify-upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo: targetRepo.value.trim(), oid: item.sha256, size: item.size })
+    }, item, 'LFS Verify');
+    item.verified = true;
+    await persist(() => patchUploadFile(sessionId, item.name, { verified: true, status: 'verifying' }));
+}
+
+async function markDeduplicated(item) {
+    item.status = 'dedup';
+    item.uploadedComplete = true;
+    item.verified = true;
+    item.error = '';
+    updateItemUploaded(item, item.size);
+    await persist(() => patchUploadFile(sessionId, item.name, {
+        status: 'dedup', uploadedComplete: true, verified: true, upload: null, parts: {}
+    }));
+}
+
+async function uploadOneFile(item, initialMeta) {
+    if (item.status === 'done' || item.status === 'dedup') return;
+    let meta = initialMeta;
+    let refreshCount = 0;
+
+    if (item.uploadedComplete) {
+        if (!item.verified && item.upload?.type === 'basic') await verifyItem(item);
+        item.status = 'done';
+        item.verified = true;
+        updateItemUploaded(item, item.size);
+        await persist(() => patchUploadFile(sessionId, item.name, { status: 'done', verified: true }));
         return;
     }
 
+    for (;;) {
+        await currentControl.waitUntilRunning();
+        if (!meta) {
+            const prepared = await prepareItems([item]);
+            meta = prepared.get(`${gameSlug.value}/${item.name}`);
+        }
+        if (!meta) throw new Error(`LFS Batch 未返回文件：${item.name}`);
+        if (meta.error) throw new Error(`${item.name}: ${meta.error.message}`);
+        if (meta.exists) {
+            await markDeduplicated(item);
+            return;
+        }
+
+        const nextUpload = normalizeUploadAction(meta.upload || item.upload);
+        if (!nextUpload) throw new Error(`无法获取文件 ${item.name} 的上传凭证`);
+        if (item.upload && !isSameUploadSession(item.upload, nextUpload)) {
+            item.parts = {};
+            updateItemUploaded(item, 0);
+        }
+        item.upload = nextUpload;
+
+        if (isUploadActionExpired(item.upload)) {
+            if (refreshCount++ >= 2) throw new Error(`${item.name} 的上传凭证反复过期`);
+            item.upload = null;
+            item.parts = {};
+            updateItemUploaded(item, 0);
+            meta = null;
+            continue;
+        }
+
+        item.status = 'uploading';
+        item.error = '';
+        phase.value = 'uploading';
+        currentTaskMsg.value = `正在并行上传：${item.name}`;
+        await persist(() => patchUploadFile(sessionId, item.name, {
+            status: 'uploading', upload: item.upload, parts: item.parts, retryCount: item.retryCount
+        }));
+
+        const activeFile = await getActiveFile(item);
+        try {
+            if (item.upload.type === 'multipart') {
+                const result = await uploadMultipartFile({
+                    file: activeFile,
+                    oid: item.sha256,
+                    upload: item.upload,
+                    completedParts: item.parts,
+                    pool: currentPool,
+                    control: currentControl,
+                    onProgress: (loaded) => updateItemUploaded(item, loaded),
+                    onWireBytes: recordWireBytes,
+                    onRetry: retryNotice(item, '分片上传'),
+                    onPartComplete: async (partNumber, etag) => {
+                        item.parts = { ...item.parts, [partNumber]: etag };
+                        await persist(() => saveCompletedPart(sessionId, item.name, partNumber, etag));
+                    }
+                });
+                item.parts = result.parts;
+                item.verified = true;
+            } else {
+                await uploadBasicFile({
+                    file: activeFile,
+                    upload: item.upload,
+                    pool: currentPool,
+                    control: currentControl,
+                    onProgress: (loaded) => updateItemUploaded(item, loaded),
+                    onWireBytes: recordWireBytes,
+                    onRetry: retryNotice(item, '文件上传')
+                });
+            }
+        } catch (err) {
+            if (!(err instanceof UploadActionExpiredError)) throw err;
+            if (refreshCount++ >= 2) throw err;
+            item.upload = null;
+            item.parts = {};
+            item.uploadedComplete = false;
+            updateItemUploaded(item, 0);
+            await persist(() => patchUploadFile(sessionId, item.name, {
+                upload: null, parts: {}, uploadedComplete: false, status: 'pending'
+            }));
+            meta = null;
+            continue;
+        }
+
+        item.uploadedComplete = true;
+        updateItemUploaded(item, item.size);
+        await persist(() => patchUploadFile(sessionId, item.name, {
+            upload: item.upload,
+            parts: item.parts,
+            uploadedComplete: true,
+            verified: item.verified,
+            retryCount: item.retryCount
+        }));
+        if (item.upload.type === 'basic' && !item.verified) await verifyItem(item);
+
+        item.status = 'done';
+        item.progress = 100;
+        item.error = '';
+        await persist(() => patchUploadFile(sessionId, item.name, {
+            status: 'done', uploadedComplete: true, verified: true, retryCount: item.retryCount
+        }));
+        return;
+    }
+}
+
+async function processUploadBatch(batch) {
+    const needPrepare = batch.filter((item) => !item.upload || isUploadActionExpired(item.upload));
+    const prepared = await prepareItems(needPrepare);
+    const results = await Promise.allSettled(batch.map(async (item) => {
+        const path = `${gameSlug.value}/${item.name}`;
+        const meta = prepared.get(path) || (item.upload ? { path, exists: false, upload: item.upload } : null);
+        try {
+            await uploadOneFile(item, meta);
+        } catch (err) {
+            if (err instanceof UploadCancelledError || currentControl?.cancelled) {
+                item.status = 'pending';
+                item.error = '';
+                await persist(() => patchUploadFile(sessionId, item.name, {
+                    status: 'pending', error: '', retryCount: item.retryCount
+                }));
+                throw err;
+            }
+            item.status = 'error';
+            item.error = err.message;
+            await persist(() => patchUploadFile(sessionId, item.name, {
+                status: 'error', error: err.message, retryCount: item.retryCount
+            }));
+            throw err;
+        }
+    }));
+    const failure = results.find((result) => result.status === 'rejected');
+    if (failure) throw failure.reason;
+}
+
+async function initializeSession() {
+    const previous = resumeCandidate.value;
+    sessionId = newUploadSessionId();
+    generatedManifest.value = createManifest(files.value);
+    await persist(() => saveUploadSession({
+        id: sessionId,
+        repo: targetRepo.value.trim(),
+        title: gameTitle.value.trim(),
+        slug: gameSlug.value.trim(),
+        sourceKind,
+        directoryHandle: sourceKind === 'fsa' ? currentDirHandle : null,
+        manifest: generatedManifest.value,
+        phase: 'hashing',
+        status: 'active',
+        fileCount: files.value.length,
+        totalBytes: totalBytes.value,
+        createdAt: Date.now()
+    }));
+    await persist(() => saveUploadFiles(files.value.map((item) => ({
+        sessionId,
+        path: item.name,
+        size: item.size,
+        lastModified: item.lastModified,
+        sha256: '',
+        status: 'pending',
+        upload: null,
+        parts: {},
+        uploadedComplete: false,
+        verified: false,
+        retryCount: 0
+    }))));
+    if (previous?.id && previous.id !== sessionId) await persist(() => deleteUploadSession(previous.id));
+    resumeCandidate.value = null;
+}
+
+function bytesToBase64(value) {
+    const bytes = new TextEncoder().encode(value);
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return btoa(binary);
+}
+
+async function commitUpload() {
+    phase.value = 'committing';
+    currentTaskMsg.value = '文件已就绪，正在创建 Hugging Face Commit';
+    await persist(() => patchUploadSession(sessionId, { phase: 'committing', status: 'active' }));
+    const operations = [
+        ...files.value.map((item) => ({
+            operation: 'lfsFile',
+            path: `${gameSlug.value}/${item.name}`,
+            oid: item.sha256,
+            size: item.size
+        })),
+        {
+            operation: 'file',
+            path: `${gameSlug.value}/manifest.json`,
+            content: bytesToBase64(generatedManifest.value),
+            encoding: 'base64'
+        }
+    ];
+    return requestJson('/api/admin/hf/commit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            repo: targetRepo.value.trim(),
+            branch: 'main',
+            summary: `Upload ${gameTitle.value.trim()} (${gameSlug.value.trim()}) via WebUI`,
+            operations
+        })
+    }, null, 'Commit');
+}
+
+async function runPipeline(createSession) {
     step.value = 'uploading';
-    uploading.value = true;
-    uploadedBytes.value = 0;
+    runState.value = 'running';
+    errorMessage.value = '';
+    stoppingForLater = false;
+    currentControl = new UploadControl();
+    currentPool = new UploadTaskPool(DEFAULT_UPLOAD_CONCURRENCY);
+    runAbortController = new AbortController();
     startSpeedMonitor();
 
     try {
-        // 若支持权限检查，主动触发一次读取授权
-        if (currentDirHandle && typeof currentDirHandle.requestPermission === 'function') {
-            try {
-                const perm = await currentDirHandle.requestPermission({ mode: 'read' });
-                if (perm !== 'granted') {
-                    throw new Error('未获取到文件夹读取授权，请重新选择文件夹并允许访问');
+        if (createSession) await initializeSession();
+        await persist(() => patchUploadSession(sessionId, { status: 'active', phase: 'hashing' }));
+
+        phase.value = 'hashing';
+        let completedHashBytes = files.value.reduce((total, item) => total + (item.sha256 ? item.size : 0), 0);
+        hashingBytes.value = completedHashBytes;
+        let batch = [];
+        let batchBytes = 0;
+        const inFlightBatches = new Set();
+        let firstError = null;
+
+        const dispatchBatch = async () => {
+            if (!batch.length) return;
+            const selected = batch;
+            batch = [];
+            batchBytes = 0;
+            let promise;
+            promise = processUploadBatch(selected)
+                .catch((err) => { firstError ||= err; })
+                .finally(() => inFlightBatches.delete(promise));
+            inFlightBatches.add(promise);
+            if (inFlightBatches.size >= MAX_IN_FLIGHT_BATCHES) await Promise.race(inFlightBatches);
+        };
+
+        for (let index = 0; index < files.value.length; index++) {
+            if (firstError) break;
+            const item = files.value[index];
+            if (item.status === 'done' || item.status === 'dedup') continue;
+            await currentControl.waitUntilRunning();
+
+            if (!item.sha256) {
+                item.status = 'hashing';
+                item.error = '';
+                currentTaskMsg.value = `正在校验文件 (${index + 1}/${files.value.length})：${item.name}`;
+                const file = await getActiveFile(item);
+                const base = completedHashBytes;
+                try {
+                    item.sha256 = await fileHasher.hash(file, {
+                        signal: runAbortController.signal,
+                        onProgress: (loaded, total) => {
+                            item.hashProgress = total ? Math.round((loaded / total) * 100) : 100;
+                            hashingBytes.value = base + loaded;
+                        }
+                    });
+                } catch (err) {
+                    item.status = 'error';
+                    throw err;
                 }
-            } catch (pErr) {
-                if (pErr.message && pErr.message.includes('授权')) throw pErr;
-            }
-        }
-
-        // 1. 准备/自动生成 manifest.json
-        let manifestData = [];
-        const nonManifestFiles = files.value.filter((f) => f.name.toLowerCase() !== 'manifest.json');
-        
-        for (const item of nonManifestFiles) {
-            manifestData.push({
-                name: item.name,
-                size: item.size
-            });
-        }
-
-        const manifestJsonStr = JSON.stringify(manifestData, null, 2);
-
-        // 2. 计算每个实体文件的 SHA-256（采用流式分块读取，防止大文件爆内存）
-        currentTaskMsg.value = '正在计算文件指纹与哈希 (SHA-256)...';
-        for (let i = 0; i < nonManifestFiles.length; i++) {
-            const item = nonManifestFiles[i];
-            item.status = 'hashing';
-            currentTaskMsg.value = `正在校验指纹 (${i + 1}/${nonManifestFiles.length}): ${item.name}`;
-            const activeFile = await getActiveFile(item);
-            item.sha256 = await computeFileSha256(activeFile);
-            item.status = 'pending';
-        }
-
-        // 3. 向 Worker 请求 LFS 预签名与秒传检测
-        currentTaskMsg.value = '正在向 Hugging Face 申请 LFS 上传通道与秒传校验...';
-        const prepRes = await fetch('/api/admin/hf/prepare-upload', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                repo: targetRepo.value.trim(),
-                files: nonManifestFiles.map((f) => ({
-                    path: `${slug}/${f.name}`,
-                    size: f.size,
-                    sha256: f.sha256
-                }))
-            })
-        });
-
-        if (!prepRes.ok) {
-            const errData = await prepRes.json().catch(() => ({}));
-            throw new Error(errData.error || `LFS 准备失败 (${prepRes.status})`);
-        }
-
-        const prepResult = await prepRes.json();
-        const objects = prepResult.objects || [];
-
-        // 4. 执行文件上传（支持秒传和并发进度）
-        currentTaskMsg.value = '正在传输文件到 Hugging Face 存储...';
-
-        const fileBytesTracker = new Map();
-
-        for (let i = 0; i < nonManifestFiles.length; i++) {
-            const item = nonManifestFiles[i];
-            const meta = objects[i];
-
-            if (meta && meta.exists) {
-                // 秒传
-                item.status = 'dedup';
-                item.progress = 100;
-                uploadedBytes.value += item.size;
-                continue;
+                completedHashBytes += item.size;
+                hashingBytes.value = completedHashBytes;
+                item.hashProgress = 100;
+                item.status = 'pending';
+                await persist(() => patchUploadFile(sessionId, item.name, {
+                    sha256: item.sha256, status: 'pending', error: ''
+                }));
             }
 
-            if (!meta || !meta.uploadAction) {
-                throw new Error(`无法获取文件 ${item.name} 的上传凭证`);
-            }
-
-            item.status = 'uploading';
-            currentTaskMsg.value = `正在上传 (${i + 1}/${nonManifestFiles.length}): ${item.name}`;
-
-            fileBytesTracker.set(item.name, 0);
-
-            const activeFile = await getActiveFile(item);
-
-            await uploadToS3(meta.uploadAction, activeFile, (loaded) => {
-                const prev = fileBytesTracker.get(item.name) || 0;
-                const diff = loaded - prev;
-                fileBytesTracker.set(item.name, loaded);
-                uploadedBytes.value += diff;
-                item.progress = Math.round((loaded / item.size) * 100);
-            });
-
-            // 告知 Hugging Face 校验已上传的 S3 对象
-            const verifyRes = await fetch('/api/admin/hf/verify-upload', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    repo: targetRepo.value.trim(),
-                    oid: item.sha256,
-                    size: item.size
-                })
-            });
-
-            if (!verifyRes.ok) {
-                const errData = await verifyRes.json().catch(() => ({}));
-                throw new Error(errData.error || `LFS 校验失败 (${verifyRes.status})`);
-            }
-
-            item.status = 'done';
-            item.progress = 100;
+            batch.push(item);
+            batchBytes += item.size;
+            if (batch.length >= HASH_BATCH_FILES || batchBytes >= HASH_BATCH_BYTES) await dispatchBatch();
         }
 
-        // 5. 提交 Git Commit
-        currentTaskMsg.value = '文件上传完毕，正在 Hugging Face 创建原子 Commit...';
-
-        const operations = [
-            // 所有的 LFS 文件
-            ...nonManifestFiles.map((f) => ({
-                operation: 'lfsFile',
-                path: `${slug}/${f.name}`,
-                oid: f.sha256,
-                size: f.size
-            })),
-            // manifest.json 以普通文件提交
-            {
-                operation: 'file',
-                path: `${slug}/manifest.json`,
-                content: btoa(unescape(encodeURIComponent(manifestJsonStr))),
-                encoding: 'base64'
-            }
-        ];
-
-        const commitRes = await fetch('/api/admin/hf/commit', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                repo: targetRepo.value.trim(),
-                branch: 'main',
-                summary: `Upload ${gameTitle.value} (${slug}) via WebUI`,
-                operations: operations
-            })
-        });
-
-        if (!commitRes.ok) {
-            const errData = await commitRes.json().catch(() => ({}));
-            throw new Error(errData.error || `Commit 失败 (${commitRes.status})`);
+        if (!firstError) await dispatchBatch();
+        await Promise.all(inFlightBatches);
+        if (firstError) throw firstError;
+        if (files.value.some((item) => !['done', 'dedup'].includes(item.status))) {
+            throw new Error('仍有文件未完成上传');
         }
 
-        const commitResult = await commitRes.json();
-        completedCommitUrl.value = commitResult.commitUrl;
-
-        // 生成代理加速后的 Manifest URL
+        const commitResult = await commitUpload();
+        completedCommitUrl.value = commitResult.commitUrl || '';
         const repoName = targetRepo.value.split('/')[1] || 'gal';
-        proxiedManifestUrl.value = `${window.location.origin}/hf/${repoName}/${slug}/manifest.json`;
-
-        stopSpeedMonitor();
+        proxiedManifestUrl.value = `${window.location.origin}/hf/${repoName}/${gameSlug.value}/manifest.json`;
+        try {
+            await deleteUploadSession(sessionId);
+        } catch {
+            // Commit 已成功，清理失败不能把整个上传改判为失败。
+        }
+        resumeCandidate.value = null;
+        runState.value = 'idle';
         step.value = 'completed';
-        toast.success('🎉 上传成功并已完成 Commit 提交！');
+        currentTaskMsg.value = '上传与 Commit 已完成';
+        toast.success('上传成功并已完成 Commit');
     } catch (err) {
-        stopSpeedMonitor();
-        toast.error('上传失败: ' + err.message);
-        currentTaskMsg.value = '❌ 上传中断: ' + err.message;
+        const stopped = stoppingForLater || currentControl?.cancelled ||
+            err instanceof UploadCancelledError || err?.name === 'AbortError';
+        for (const item of files.value) {
+            if (item.status === 'hashing') item.status = 'pending';
+        }
+        if (stopped) {
+            runState.value = 'stopped';
+            currentSpeed.value = '--';
+            timeRemaining.value = '--';
+            currentTaskMsg.value = persistenceEnabled ? '上传已停止，断点已保存' : '上传已停止，断点保存失败';
+            await persist(() => patchUploadSession(sessionId, { status: 'paused', phase: phase.value }));
+        } else {
+            runState.value = 'failed';
+            errorMessage.value = err.message || '上传失败';
+            currentTaskMsg.value = `上传中断：${errorMessage.value}`;
+            await persist(() => patchUploadSession(sessionId, {
+                status: 'failed', phase: phase.value, error: errorMessage.value
+            }));
+            toast.error(`上传失败：${errorMessage.value}`);
+        }
     } finally {
-        uploading.value = false;
+        stopSpeedMonitor();
+        runAbortController = null;
     }
+}
+
+function launchPipeline(createSession = false) {
+    if (pipelinePromise) return pipelinePromise;
+    pipelinePromise = runPipeline(createSession).finally(() => {
+        pipelinePromise = null;
+    });
+    return pipelinePromise;
+}
+
+function startUpload() {
+    if (!files.value.length) return;
+    gameTitle.value = gameTitle.value.trim();
+    gameSlug.value = gameSlug.value.trim();
+    targetRepo.value = targetRepo.value.trim();
+    if (!gameTitle.value.trim() || !gameSlug.value.trim() || !targetRepo.value.trim()) {
+        toast.error('游戏名称、目标目录和仓库不能为空');
+        return;
+    }
+    if (files.value.length > MAX_COMMIT_FILES) {
+        toast.error(`单次最多上传 ${MAX_COMMIT_FILES} 个资源文件`);
+        return;
+    }
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,95})\/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,95})$/.test(targetRepo.value.trim())) {
+        toast.error('Hugging Face 仓库必须是 owner/name 格式');
+        return;
+    }
+    if (/[\\/\u0000-\u001f\u007f]/.test(gameSlug.value) || ['.', '..'].includes(gameSlug.value)) {
+        toast.error('目标目录不能包含路径分隔符或控制字符');
+        return;
+    }
+    launchPipeline(true);
+}
+
+async function pauseUpload() {
+    if (runState.value !== 'running') return;
+    currentControl?.pause();
+    runState.value = 'paused';
+    currentTaskMsg.value = '上传已暂停，已完成分片会保留';
+    await persist(() => patchUploadSession(sessionId, { status: 'paused', phase: phase.value }));
+}
+
+async function continueUpload() {
+    if (runState.value === 'paused' && pipelinePromise) {
+        runState.value = 'running';
+        currentControl?.resume();
+        currentTaskMsg.value = '正在继续上传';
+        await persist(() => patchUploadSession(sessionId, { status: 'active', phase: phase.value }));
+        return;
+    }
+    launchPipeline(false);
+}
+
+async function stopForLater() {
+    if (!pipelinePromise) {
+        runState.value = 'stopped';
+        return;
+    }
+    stoppingForLater = true;
+    currentControl?.cancel();
+    runAbortController?.abort(new UploadCancelledError());
+    await persist(() => patchUploadSession(sessionId, { status: 'paused', phase: phase.value }));
+    await pipelinePromise;
+}
+
+async function handleClose() {
+    if (runState.value === 'running') return;
+    if (runState.value === 'paused') await stopForLater();
+    emit('close');
+}
+
+function retryUpload() {
+    for (const item of files.value) {
+        if (item.status === 'error') {
+            item.status = 'pending';
+            item.error = '';
+        }
+    }
+    launchPipeline(false);
 }
 
 function copyUrl() {
-    if (proxiedManifestUrl.value) {
-        navigator.clipboard.writeText(proxiedManifestUrl.value);
-        toast.success('已复制代理清单链接！');
-    }
+    if (!proxiedManifestUrl.value) return;
+    navigator.clipboard.writeText(proxiedManifestUrl.value);
+    toast.success('已复制代理清单链接');
 }
 
 function handleCreateGameDirectly() {
-    // 自动寻找 entryXp3 (如 data.xp3 或第一个 xp3)
-    let detectedEntry = '';
-    const xp3Files = files.value.filter((f) => f.name.toLowerCase().endsWith('.xp3'));
-    if (xp3Files.some((f) => f.name.toLowerCase() === 'data.xp3')) {
-        detectedEntry = 'data.xp3';
-    } else if (xp3Files.length) {
-        detectedEntry = xp3Files[0].name;
-    }
-
+    const xp3Files = files.value.filter((file) => file.name.toLowerCase().endsWith('.xp3'));
+    const dataXp3 = xp3Files.find((file) => file.name.toLowerCase() === 'data.xp3');
     emit('complete', {
         title: gameTitle.value,
         downloadUrl: proxiedManifestUrl.value,
-        entryXp3: detectedEntry
+        entryXp3: dataXp3?.name || xp3Files[0]?.name || ''
     });
     emit('close');
 }
 
-function reset() {
+async function resetForOpen() {
     step.value = 'select';
+    runState.value = 'idle';
+    phase.value = 'idle';
     files.value = [];
     totalBytes.value = 0;
+    totalHashBytes.value = 0;
     uploadedBytes.value = 0;
-    uploading.value = false;
+    hashingBytes.value = 0;
+    wireBytes.value = 0;
+    errorMessage.value = '';
+    currentTaskMsg.value = '';
+    currentDirHandle = null;
+    sessionId = '';
+    pendingResumeSession = null;
+    persistenceEnabled = true;
+    persistenceWarningShown = false;
     stopSpeedMonitor();
+    try {
+        resumeCandidate.value = await getLatestUploadSession();
+    } catch {
+        resumeCandidate.value = null;
+        persistenceEnabled = false;
+    }
 }
 
-watch(() => props.show, (val) => {
-    if (val) reset();
-});
+watch(() => props.show, (visible) => {
+    if (visible) resetForOpen();
+}, { immediate: true });
 
 onUnmounted(() => {
+    currentControl?.cancel();
+    runAbortController?.abort(new UploadCancelledError());
     stopSpeedMonitor();
+    fileHasher.destroy();
 });
 </script>
 
 <template>
-    <div v-if="show" class="hf-modal-backdrop" @click.self="!uploading && emit('close')">
+    <div v-if="show" class="hf-modal-backdrop" @click.self="handleClose">
         <div class="hf-modal">
             <header class="hf-head">
                 <div class="hf-head-title">
-                    <CloudUpload class="hf-logo" :size="20" />
-                    <h2>上传游戏到 Hugging Face 仓库</h2>
+                    <CloudUpload class="hf-logo" :size="20" aria-hidden="true" />
+                    <h2>上传游戏到 Hugging Face</h2>
                 </div>
-                <button v-if="!uploading" class="btn btn-ghost btn-sm" @click="emit('close')"><X :size="16" /></button>
+                <button
+                    v-if="runState !== 'running'"
+                    class="btn btn-ghost btn-sm icon-button"
+                    title="关闭"
+                    aria-label="关闭"
+                    @click="handleClose">
+                    <X :size="16" />
+                </button>
             </header>
 
             <div class="hf-body">
-                <!-- 步骤 1: 选择文件夹 & 确认配置 -->
                 <div v-if="step === 'select'" class="step-select">
+                    <div v-if="resumeCandidate" class="resume-banner">
+                        <div class="resume-info">
+                            <RotateCcw :size="18" aria-hidden="true" />
+                            <div>
+                                <strong>发现未完成上传</strong>
+                                <span>{{ resumeCandidate.title }} · {{ resumeCandidate.repo }}/{{ resumeCandidate.slug }}</span>
+                            </div>
+                        </div>
+                        <div class="resume-actions">
+                            <button class="btn btn-sm btn-primary" @click="resumePreviousUpload">
+                                <Play :size="14" aria-hidden="true" />
+                                <span>继续</span>
+                            </button>
+                            <button class="btn btn-sm icon-button" title="删除断点" aria-label="删除断点" @click="discardResume">
+                                <Trash2 :size="14" />
+                            </button>
+                        </div>
+                    </div>
+
                     <div
                         class="dropzone"
                         :class="{ active: isDragging }"
+                        @click="onPickFolder"
                         @dragover.prevent="isDragging = true"
                         @dragleave.prevent="isDragging = false"
-                        @drop.prevent="onDrop"
-                        @click="onPickFolder">
-                        <div class="drop-icon"><Folder :size="40" /></div>
-                        <h3>{{ files.length ? `已选择：${gameTitle} (${files.length} 个文件)` : '点击选择游戏文件夹' }}</h3>
+                        @drop.prevent="onDrop">
+                        <Folder class="drop-icon" :size="38" aria-hidden="true" />
+                        <h3>{{ files.length ? gameTitle : '选择本地游戏文件夹' }}</h3>
                         <p class="drop-hint">
-                            {{ files.length ? `总大小 ${formatBytes(totalBytes)}，点击可更换文件夹` : '支持全套 .xp3 / 音视频资源与 manifest.json 自动识别' }}
+                            {{ files.length ? `${files.length} 个资源，${formatBytes(totalBytes)}` : '保留目录结构并扫描全部游戏资源' }}
                         </p>
-                        <div class="drop-fallback">
-                            <span class="fallback-hint">如遇系统权限弹窗异常，可点此</span>
-                            <button type="button" class="btn btn-ghost btn-sm fallback-btn" @click.stop="dirInput.click()">
-                                <FolderOpen :size="14" />
-                                <span>备用文件选择器</span>
-                            </button>
-                        </div>
+                        <button class="btn btn-sm fallback-btn" type="button" @click.stop="dirInput?.click()">
+                            <FolderOpen :size="14" aria-hidden="true" />
+                            <span>备用文件选择器</span>
+                        </button>
                         <input
                             ref="dirInput"
                             type="file"
@@ -508,132 +1002,154 @@ onUnmounted(() => {
                             @change="onInputFolderSelect">
                     </div>
 
-                    <div v-if="files.length" class="config-card">
-                        <div class="field-row">
+                    <div v-if="files.length" class="config-panel">
+                        <div class="field-grid">
                             <div class="field-item">
                                 <label>游戏名称</label>
                                 <input v-model="gameTitle" class="input" placeholder="水葬银货">
                             </div>
                             <div class="field-item">
-                                <label>目标拼音目录 (URL 路径)</label>
+                                <label>目标目录</label>
                                 <input v-model="gameSlug" class="input" placeholder="shuizangyinhuo">
                             </div>
-                        </div>
-
-                        <div class="field-row">
                             <div class="field-item">
-                                <label>目标 Hugging Face 仓库</label>
+                                <label>Hugging Face 仓库</label>
                                 <input v-model="targetRepo" class="input" placeholder="clown145/gal">
                             </div>
                             <div class="field-item">
-                                <label>清单状态</label>
-                                <div class="manifest-status-badge" :class="{ ok: hasExistingManifest }">
+                                <label>manifest.json</label>
+                                <div class="manifest-status" :class="{ existing: hasExistingManifest }">
                                     <CheckCircle2 v-if="hasExistingManifest" :size="14" />
                                     <Sparkles v-else :size="14" />
-                                    <span>{{ hasExistingManifest ? '检测到已有 manifest.json' : '缺失 manifest.json，将自动生成' }}</span>
+                                    <span>{{ hasExistingManifest ? '将按当前目录重新生成' : '提交时自动生成' }}</span>
                                 </div>
                             </div>
                         </div>
 
                         <div class="files-preview">
                             <div class="preview-head">
-                                <span>待上传文件列表 (共 {{ files.length }} 个)</span>
-                                <span>{{ formatBytes(totalBytes) }}</span>
+                                <span>待上传资源</span>
+                                <span>{{ files.length }} 个 · {{ formatBytes(totalBytes) }}</span>
                             </div>
                             <div class="preview-list">
-                                <div v-for="f in files.slice(0, 8)" :key="f.name" class="preview-item">
-                                    <span class="file-name">{{ f.name }}</span>
-                                    <span class="file-size">{{ formatBytes(f.size) }}</span>
+                                <div v-for="file in files.slice(0, 8)" :key="file.name" class="preview-item">
+                                    <span class="file-name">{{ file.name }}</span>
+                                    <span>{{ formatBytes(file.size) }}</span>
                                 </div>
-                                <div v-if="files.length > 8" class="preview-more">
-                                    ... 以及另外 {{ files.length - 8 }} 个文件
-                                </div>
+                                <div v-if="files.length > 8" class="preview-more">另外 {{ files.length - 8 }} 个文件</div>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- 步骤 2: 正在上传 (动态大进度条 + 速度 + 单文件状态) -->
                 <div v-else-if="step === 'uploading'" class="step-uploading">
                     <div class="progress-dashboard">
                         <div class="dash-top">
-                            <span class="dash-title">{{ currentTaskMsg }}</span>
+                            <div>
+                                <span class="phase-label">{{ phaseText }}</span>
+                                <span class="dash-title">{{ currentTaskMsg }}</span>
+                            </div>
                             <span class="dash-pct">{{ overallPercent }}%</span>
                         </div>
-                        <div class="bar-bg">
+                        <div class="bar-bg" role="progressbar" :aria-valuenow="overallPercent" aria-valuemin="0" aria-valuemax="100">
                             <div class="bar-fill" :style="{ width: overallPercent + '%' }" />
                         </div>
                         <div class="dash-meta">
-                            <span><Package :size="13" /> 已传输：{{ formatBytes(uploadedBytes) }} / {{ formatBytes(totalBytes) }}</span>
-                            <span><Gauge :size="13" /> 上传速度：{{ currentSpeed }}</span>
-                            <span><Clock :size="13" /> 预估剩余：{{ timeRemaining }}</span>
+                            <span><Package :size="13" /> 已完成 {{ formatBytes(uploadedBytes) }} / {{ formatBytes(totalBytes) }}</span>
+                            <span><Gauge :size="13" /> {{ currentSpeed }}</span>
+                            <span><Clock :size="13" /> {{ timeRemaining }}</span>
                         </div>
+                        <div class="hash-row">
+                            <span>SHA-256 {{ hashPercent }}%</span>
+                            <span>{{ formatBytes(hashingBytes) }} / {{ formatBytes(totalHashBytes) }}</span>
+                            <span v-if="wireBytes">网络已发送 {{ formatBytes(wireBytes) }}</span>
+                        </div>
+                    </div>
+
+                    <div v-if="errorMessage" class="error-panel">
+                        <AlertCircle :size="18" aria-hidden="true" />
+                        <span>{{ errorMessage }}</span>
                     </div>
 
                     <div class="upload-files-table">
                         <div class="table-header">
                             <span class="col-file">文件路径</span>
                             <span class="col-size">大小</span>
-                            <span class="col-status">状态 / 进度</span>
+                            <span class="col-status">状态</span>
                         </div>
                         <div class="table-body">
-                            <div v-for="f in files" :key="f.name" class="table-row">
-                                <span class="col-file" :title="f.name">{{ f.name }}</span>
-                                <span class="col-size">{{ formatBytes(f.size) }}</span>
-                                <span class="col-status">
-                                    <span v-if="f.status === 'pending'" class="badge badge-pending">等待中</span>
-                                    <span v-else-if="f.status === 'hashing'" class="badge badge-hash">校验哈希</span>
-                                    <span v-else-if="f.status === 'uploading'" class="badge badge-uploading">{{ f.progress }}%</span>
-                                    <span v-else-if="f.status === 'dedup'" class="badge badge-dedup">秒传 (云端已有)</span>
-                                    <span v-else-if="f.status === 'done'" class="badge badge-done">已完成</span>
+                            <div v-for="file in files" :key="file.name" class="table-row">
+                                <span class="col-file" :title="file.name">{{ file.name }}</span>
+                                <span class="col-size">{{ formatBytes(file.size) }}</span>
+                                <span class="col-status" :title="file.error">
+                                    <span v-if="file.status === 'pending'" class="badge badge-pending">等待</span>
+                                    <span v-else-if="file.status === 'hashing'" class="badge badge-hash">哈希 {{ file.hashProgress }}%</span>
+                                    <span v-else-if="file.status === 'uploading'" class="badge badge-uploading">
+                                        {{ file.upload?.type === 'multipart' ? '分片' : '上传' }} {{ file.progress }}%
+                                    </span>
+                                    <span v-else-if="file.status === 'verifying'" class="badge badge-verify">校验</span>
+                                    <span v-else-if="file.status === 'dedup'" class="badge badge-dedup">秒传</span>
+                                    <span v-else-if="file.status === 'done'" class="badge badge-done">完成</span>
                                     <span v-else class="badge badge-err">失败</span>
+                                    <small v-if="file.retryCount">重试 {{ file.retryCount }}</small>
                                 </span>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- 步骤 3: 上传完成 -->
                 <div v-else-if="step === 'completed'" class="step-completed">
                     <div class="complete-hero">
-                        <div class="complete-icon"><CheckCircle2 :size="44" /></div>
-                        <h3>上传成功！资源已就绪</h3>
-                        <p>游戏资源已同步至 Hugging Face <code>{{ targetRepo }}/{{ gameSlug }}</code> 并开启动态 CDN 加速中转。</p>
+                        <CheckCircle2 :size="44" aria-hidden="true" />
+                        <h3>上传完成</h3>
+                        <p>资源已提交到 <code>{{ targetRepo }}/{{ gameSlug }}</code></p>
                     </div>
-
-                    <div class="url-card">
-                        <label>代理加速清单地址 (已配置 1 年专属边缘缓存隔离)：</label>
+                    <div class="url-panel">
+                        <label>代理清单地址</label>
                         <div class="url-input-group">
                             <input readonly :value="proxiedManifestUrl" class="input">
-                            <button class="btn btn-sm" @click="copyUrl">
+                            <button class="btn btn-sm icon-button" title="复制" aria-label="复制" @click="copyUrl">
                                 <Copy :size="14" />
-                                <span>复制</span>
                             </button>
                         </div>
                     </div>
-
                     <div v-if="completedCommitUrl" class="commit-link">
-                        <a :href="completedCommitUrl" target="_blank" rel="noopener">查看 Hugging Face Commit 记录 ↗</a>
+                        <a :href="completedCommitUrl" target="_blank" rel="noopener">查看 Hugging Face Commit</a>
                     </div>
                 </div>
             </div>
 
             <footer class="hf-foot">
-                <div v-if="step === 'select'">
-                    <button class="btn" @click="emit('close')">取消</button>
+                <div v-if="step === 'select'" class="footer-actions">
+                    <button class="btn" @click="handleClose">取消</button>
                     <button class="btn btn-primary" :disabled="!files.length" @click="startUpload">
                         <CloudUpload :size="15" aria-hidden="true" />
-                        <span>开始上传到 Hugging Face</span>
+                        <span>开始上传</span>
                     </button>
                 </div>
-                <div v-else-if="step === 'uploading'">
-                    <span class="upload-hint">正在传输中，请勿关闭或刷新此页面...</span>
+                <div v-else-if="step === 'uploading'" class="footer-actions upload-actions">
+                    <template v-if="runState === 'running'">
+                        <button class="btn" @click="pauseUpload"><Pause :size="15" /><span>暂停</span></button>
+                        <button class="btn btn-danger" @click="stopForLater"><Square :size="14" /><span>停止并保存断点</span></button>
+                    </template>
+                    <template v-else-if="runState === 'paused'">
+                        <button class="btn btn-primary" @click="continueUpload"><Play :size="15" /><span>继续上传</span></button>
+                        <button class="btn" @click="stopForLater"><Square :size="14" /><span>停止</span></button>
+                    </template>
+                    <template v-else-if="runState === 'failed'">
+                        <button class="btn" @click="handleClose">关闭</button>
+                        <button class="btn btn-primary" @click="retryUpload"><RotateCcw :size="15" /><span>重试失败阶段</span></button>
+                    </template>
+                    <template v-else>
+                        <button class="btn" @click="handleClose">关闭</button>
+                        <button class="btn btn-primary" @click="continueUpload"><Play :size="15" /><span>继续此上传</span></button>
+                    </template>
                 </div>
-                <div v-else-if="step === 'completed'" class="complete-actions">
-                    <button class="btn" @click="emit('close')">关闭</button>
-                    <button class="btn btn-primary btn-lg" @click="handleCreateGameDirectly">
+                <div v-else class="footer-actions">
+                    <button class="btn" @click="handleClose">关闭</button>
+                    <button class="btn btn-primary" @click="handleCreateGameDirectly">
                         <Plus :size="16" aria-hidden="true" />
-                        <span>一键创建游戏并填好表单</span>
+                        <span>创建游戏条目</span>
                     </button>
                 </div>
             </footer>
@@ -645,370 +1161,155 @@ onUnmounted(() => {
 .hf-modal-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.7);
-    backdrop-filter: blur(4px);
+    z-index: 1000;
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
     padding: 20px;
+    background: rgba(0, 0, 0, 0.72);
+    backdrop-filter: blur(4px);
 }
 
 .hf-modal {
-    background: #1e1e24;
-    border: 1px solid #33333d;
-    border-radius: 12px;
-    width: 100%;
-    max-width: 760px;
-    max-height: 90vh;
     display: flex;
     flex-direction: column;
-    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+    width: min(820px, 100%);
+    max-height: 92vh;
+    overflow: hidden;
     color: #e6e6eb;
+    background: #1e1e24;
+    border: 1px solid #35353f;
+    border-radius: 8px;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
 }
 
-.hf-head {
-    padding: 18px 24px;
-    border-bottom: 1px solid #2d2d38;
+.hf-head,
+.hf-foot {
     display: flex;
+    align-items: center;
     justify-content: space-between;
-    align-items: center;
+    padding: 16px 22px;
+    background: #181820;
 }
 
-.hf-head-title {
+.hf-head { border-bottom: 1px solid #2d2d38; }
+.hf-foot { justify-content: flex-end; border-top: 1px solid #2d2d38; }
+.hf-head-title, .footer-actions, .resume-actions, .url-input-group { display: flex; align-items: center; gap: 10px; }
+.hf-head h2 { margin: 0; font-size: 1.05rem; letter-spacing: 0; }
+.hf-logo { color: #ffd21e; }
+.hf-body { flex: 1; min-height: 0; padding: 22px; overflow-y: auto; }
+.icon-button { width: 34px; min-width: 34px; padding: 0; justify-content: center; }
+
+.resume-banner {
     display: flex;
     align-items: center;
-    gap: 12px;
+    justify-content: space-between;
+    gap: 14px;
+    margin-bottom: 14px;
+    padding: 12px 14px;
+    background: #17251f;
+    border: 1px solid #28543d;
+    border-radius: 6px;
 }
 
-.hf-logo {
-    font-size: 24px;
-}
-
-.hf-head h2 {
-    margin: 0;
-    font-size: 1.15rem;
-    font-weight: 600;
-}
-
-.hf-body {
-    padding: 24px;
-    overflow-y: auto;
-    flex: 1;
-}
+.resume-info { display: flex; align-items: center; gap: 10px; min-width: 0; color: #64d995; }
+.resume-info div { display: flex; flex-direction: column; min-width: 0; }
+.resume-info span { overflow: hidden; color: #9eb4a7; font-size: 0.78rem; text-overflow: ellipsis; white-space: nowrap; }
 
 .dropzone {
-    border: 2px dashed #40404f;
-    border-radius: 10px;
-    padding: 32px;
+    padding: 28px;
     text-align: center;
     cursor: pointer;
     background: #18181f;
-    transition: all 0.2s ease;
-}
-
-.dropzone:hover, .dropzone.active {
-    border-color: #ffd21e;
-    background: #23232c;
-}
-
-.drop-icon {
-    font-size: 40px;
-    margin-bottom: 12px;
-}
-
-.dropzone h3 {
-    margin: 0 0 6px;
-    font-size: 1.05rem;
-}
-
-.drop-hint {
-    margin: 0;
-    font-size: 0.85rem;
-    color: #9494a0;
-}
-
-.drop-fallback {
-    margin-top: 14px;
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    background: #111116;
-    padding: 6px 12px;
-    border-radius: 6px;
-    border: 1px solid #282833;
-}
-
-.fallback-hint {
-    font-size: 0.75rem;
-    color: #888898;
-}
-
-.fallback-btn {
-    font-size: 0.75rem;
-    padding: 2px 8px;
-    height: 26px;
-    color: #e0e0e0;
-}
-
-.config-card {
-    margin-top: 20px;
-    background: #15151c;
-    border: 1px solid #2d2d38;
+    border: 2px dashed #444451;
     border-radius: 8px;
-    padding: 16px;
+    transition: border-color 0.2s, background 0.2s;
 }
 
-.field-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-    margin-bottom: 14px;
-}
+.dropzone:hover, .dropzone.active { background: #202027; border-color: #ffd21e; }
+.drop-icon { margin-bottom: 8px; color: #ffd21e; }
+.dropzone h3 { margin: 0 0 5px; font-size: 1rem; letter-spacing: 0; }
+.drop-hint { margin: 0; color: #9494a0; font-size: 0.82rem; }
+.fallback-btn { margin-top: 14px; }
 
-.field-item label {
-    display: block;
-    font-size: 0.8rem;
-    color: #a0a0b0;
-    margin-bottom: 6px;
-}
-
-.manifest-status-badge {
-    height: 38px;
+.config-panel { margin-top: 18px; }
+.field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.field-item label, .url-panel label { display: block; margin-bottom: 6px; color: #a0a0b0; font-size: 0.78rem; }
+.manifest-status {
     display: flex;
     align-items: center;
-    padding: 0 12px;
-    border-radius: 6px;
+    gap: 7px;
+    height: 38px;
+    padding: 0 11px;
+    color: #ffd21e;
+    font-size: 0.8rem;
     background: #2a2312;
     border: 1px solid #735314;
-    color: #ffd21e;
-    font-size: 0.85rem;
+    border-radius: 5px;
 }
+.manifest-status.existing { color: #66d894; background: #14261c; border-color: #296340; }
 
-.manifest-status-badge.ok {
-    background: #13281c;
-    border-color: #216a3a;
-    color: #4ade80;
-}
-
-.files-preview {
-    margin-top: 14px;
-    background: #1a1a24;
-    border-radius: 6px;
-    padding: 12px;
-    font-size: 0.85rem;
-}
-
-.preview-head {
-    display: flex;
-    justify-content: space-between;
-    font-weight: 600;
-    padding-bottom: 8px;
-    border-bottom: 1px solid #2a2a38;
-    color: #b0b0c0;
-}
-
-.preview-list {
-    margin-top: 8px;
-    max-height: 160px;
-    overflow-y: auto;
-}
-
-.preview-item {
-    display: flex;
-    justify-content: space-between;
-    padding: 4px 0;
-    color: #888899;
-}
-
-.preview-more {
-    text-align: center;
-    color: #777788;
-    margin-top: 6px;
-    font-style: italic;
-}
-
-/* 进度仪表板 */
-.progress-dashboard {
-    background: #15151c;
+.files-preview, .progress-dashboard, .url-panel {
+    margin-top: 16px;
+    padding: 14px;
+    background: #17171e;
     border: 1px solid #2d2d38;
-    border-radius: 10px;
-    padding: 20px;
-    margin-bottom: 20px;
+    border-radius: 7px;
 }
+.preview-head, .preview-item { display: flex; justify-content: space-between; gap: 16px; }
+.preview-head { padding-bottom: 8px; color: #b5b5c2; font-size: 0.8rem; font-weight: 600; border-bottom: 1px solid #2a2a35; }
+.preview-list { max-height: 150px; margin-top: 7px; overflow-y: auto; }
+.preview-item { padding: 4px 0; color: #8e8e9c; font-size: 0.8rem; }
+.file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-more { padding-top: 6px; color: #777785; font-size: 0.78rem; text-align: center; }
 
-.dash-top {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 12px;
-}
+.progress-dashboard { margin-top: 0; padding: 18px; }
+.dash-top { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 12px; }
+.dash-top > div { display: flex; flex-direction: column; min-width: 0; }
+.phase-label { color: #ffd21e; font-size: 0.75rem; font-weight: 700; }
+.dash-title { overflow: hidden; color: #b7b7c4; font-size: 0.82rem; text-overflow: ellipsis; white-space: nowrap; }
+.dash-pct { flex: 0 0 auto; color: #fff; font-size: 1.35rem; font-weight: 700; }
+.bar-bg { height: 10px; margin-bottom: 11px; overflow: hidden; background: #2b2b36; border-radius: 5px; }
+.bar-fill { height: 100%; background: #f0bd24; transition: width 0.2s ease; }
+.dash-meta, .hash-row { display: flex; justify-content: space-between; gap: 12px; color: #a2a2af; font-size: 0.78rem; }
+.dash-meta span { display: inline-flex; align-items: center; gap: 5px; }
+.hash-row { margin-top: 10px; padding-top: 9px; color: #7f8fa4; border-top: 1px solid #292934; }
 
-.dash-title {
-    font-size: 0.95rem;
-    font-weight: 500;
-    color: #ffd21e;
-}
+.error-panel { display: flex; gap: 9px; margin-bottom: 14px; padding: 11px 13px; color: #fca5a5; font-size: 0.82rem; background: #30191b; border: 1px solid #693034; border-radius: 6px; }
+.upload-files-table { overflow: hidden; font-size: 0.82rem; border: 1px solid #2d2d38; border-radius: 7px; }
+.table-header, .table-row { display: grid; grid-template-columns: minmax(0, 1fr) 100px 150px; align-items: center; gap: 10px; padding: 9px 13px; }
+.table-header { color: #9999a8; font-weight: 600; background: #16161d; border-bottom: 1px solid #2d2d38; }
+.table-body { max-height: 310px; overflow-y: auto; background: #1b1b23; }
+.table-row { border-bottom: 1px solid #262630; }
+.col-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.col-size { color: #8c8c99; }
+.col-status { display: flex; align-items: center; gap: 6px; }
+.col-status small { color: #9d7d56; font-size: 0.68rem; }
+.badge { display: inline-block; padding: 2px 7px; font-size: 0.72rem; white-space: nowrap; border-radius: 4px; }
+.badge-pending { color: #a0a0b0; background: #2c2c38; }
+.badge-hash { color: #7dc0ff; background: #1c2e3d; }
+.badge-uploading { color: #fbbf24; background: #382c12; }
+.badge-verify { color: #c4a7ff; background: #2c2340; }
+.badge-dedup, .badge-done { color: #4ade80; background: #14331e; }
+.badge-err { color: #f87171; background: #3b1818; }
 
-.dash-pct {
-    font-size: 1.4rem;
-    font-weight: 700;
-    color: #ffffff;
-}
+.complete-hero { padding: 24px 0 8px; color: #4ade80; text-align: center; }
+.complete-hero h3 { margin: 8px 0 5px; font-size: 1.2rem; letter-spacing: 0; }
+.complete-hero p { margin: 0; color: #a0a0b2; font-size: 0.85rem; }
+.url-input-group .input { min-width: 0; }
+.commit-link { margin-top: 15px; font-size: 0.82rem; text-align: center; }
+.commit-link a { color: #76b8f7; text-decoration: none; }
+.btn-danger { color: #fca5a5; border-color: #693034; }
 
-.bar-bg {
-    height: 12px;
-    background: #2a2a38;
-    border-radius: 6px;
-    overflow: hidden;
-    margin-bottom: 12px;
-}
-
-.bar-fill {
-    height: 100%;
-    background: linear-gradient(90deg, #ffd21e, #ff9900);
-    transition: width 0.2s ease;
-}
-
-.dash-meta {
-    display: flex;
-    justify-content: space-between;
-    font-size: 0.85rem;
-    color: #a0a0b2;
-}
-
-.upload-files-table {
-    border: 1px solid #2d2d38;
-    border-radius: 8px;
-    overflow: hidden;
-    font-size: 0.85rem;
-}
-
-.table-header {
-    display: grid;
-    grid-template-columns: 1fr 100px 140px;
-    background: #16161f;
-    padding: 10px 14px;
-    font-weight: 600;
-    border-bottom: 1px solid #2d2d38;
-    color: #9c9cae;
-}
-
-.table-body {
-    max-height: 240px;
-    overflow-y: auto;
-    background: #1b1b24;
-}
-
-.table-row {
-    display: grid;
-    grid-template-columns: 1fr 100px 140px;
-    padding: 8px 14px;
-    border-bottom: 1px solid #23232f;
-    align-items: center;
-}
-
-.col-file {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.badge {
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    display: inline-block;
-}
-
-.badge-pending { background: #2c2c38; color: #a0a0b0; }
-.badge-hash { background: #1c2e3d; color: #60a5fa; }
-.badge-uploading { background: #382c12; color: #fbbf24; }
-.badge-dedup { background: #1b332b; color: #34d399; font-weight: 600; }
-.badge-done { background: #14331e; color: #4ade80; }
-.badge-err { background: #3b1818; color: #f87171; }
-
-/* 完成页 */
-.complete-hero {
-    text-align: center;
-    padding: 20px 0;
-}
-
-.complete-icon {
-    font-size: 54px;
-    margin-bottom: 12px;
-}
-
-.complete-hero h3 {
-    font-size: 1.3rem;
-    margin: 0 0 8px;
-    color: #4ade80;
-}
-
-.complete-hero p {
-    color: #a0a0b2;
-    margin: 0;
-    font-size: 0.9rem;
-}
-
-.url-card {
-    background: #15151c;
-    border: 1px solid #2d2d38;
-    border-radius: 8px;
-    padding: 16px;
-    margin: 20px 0;
-}
-
-.url-card label {
-    display: block;
-    font-size: 0.85rem;
-    color: #a0a0b0;
-    margin-bottom: 8px;
-}
-
-.url-input-group {
-    display: flex;
-    gap: 8px;
-}
-
-.commit-link {
-    text-align: center;
-    font-size: 0.85rem;
-}
-
-.commit-link a {
-    color: #60a5fa;
-    text-decoration: none;
-}
-
-.commit-link a:hover {
-    text-decoration: underline;
-}
-
-.hf-foot {
-    padding: 16px 24px;
-    border-top: 1px solid #2d2d38;
-    display: flex;
-    justify-content: flex-end;
-    background: #181820;
-    border-bottom-left-radius: 12px;
-    border-bottom-right-radius: 12px;
-}
-
-.hf-foot > div {
-    display: flex;
-    gap: 12px;
-    align-items: center;
-}
-
-.upload-hint {
-    color: #fbbf24;
-    font-size: 0.85rem;
-}
-
-.btn-lg {
-    padding: 8px 20px;
-    font-size: 0.95rem;
-    font-weight: 600;
+@media (max-width: 680px) {
+    .hf-modal-backdrop { align-items: stretch; padding: 0; }
+    .hf-modal { max-height: 100dvh; border: 0; border-radius: 0; }
+    .hf-body { padding: 16px; }
+    .field-grid { grid-template-columns: 1fr; }
+    .dash-meta, .hash-row { flex-direction: column; gap: 6px; }
+    .table-header, .table-row { grid-template-columns: minmax(0, 1fr) 76px 106px; padding-inline: 9px; }
+    .col-status { align-items: flex-start; flex-direction: column; }
+    .resume-banner { align-items: flex-start; }
+    .upload-actions { flex-wrap: wrap; justify-content: flex-end; }
 }
 </style>
