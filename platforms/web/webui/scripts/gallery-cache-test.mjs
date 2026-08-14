@@ -439,10 +439,11 @@ try {
         [...document.querySelectorAll('.folder-permission-actions button')]
             .find((button) => button.textContent.includes('解除绑定'))?.click();
     });
-    await blockedPlayer.evaluate(() => new Promise((r) => setTimeout(r, 100)));
+    await blockedPlayer.waitForSelector('.confirm-actions button');
     await blockedPlayer.evaluate(() => {
-        const btn = document.querySelector('.confirm-dialog-actions .btn-primary') ||
-                    document.querySelector('.confirm-dialog-actions button');
+        const btn = document.querySelector('.confirm-actions .btn-primary') ||
+                    document.querySelector('.confirm-actions .btn-danger') ||
+                    document.querySelector('.confirm-actions button:last-child');
         btn?.click();
     });
     await blockedPlayer.waitForFunction(() => window.__engineBoots > 0);
