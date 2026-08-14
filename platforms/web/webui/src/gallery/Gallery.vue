@@ -443,7 +443,7 @@ onUnmounted(() => {
             </button>
             <AccountMenu
                 cache-tools
-                :cache-warning="folderAccess.needsPermission.value"
+                :cache-warning="folderAccess.needsPermission"
                 @open-cache="openCachePanel" />
         </div>
     </header>

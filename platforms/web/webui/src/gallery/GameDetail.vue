@@ -242,7 +242,7 @@ onUnmounted(() => {
         <div class="detail-nav-actions">
             <a class="btn btn-ghost btn-sm" href="/settings">设置</a>
             <AccountMenu
-                :cache-warning="folderAccess.needsPermission.value"
+                :cache-warning="folderAccess.needsPermission"
                 @open-cache="openCachePermission" />
         </div>
     </header>
