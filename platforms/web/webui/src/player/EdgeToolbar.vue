@@ -298,15 +298,16 @@ onUnmounted(() => {
 }
 .handle:not(.touch):hover { opacity: 1; }
 
-/* 淡出后：保留低对比微弱指示点与充足触控热区 */
+/* 淡出后：视觉上完全透明，命中区收成贴顶窄带，点它依然可触发 */
 .handle.dimmed {
-    opacity: 0.12;
-    min-height: 32px;
+    opacity: 0;
+    min-height: 24px;
+    height: 24px;
     width: 64px;
     padding: 0;
-    background: rgba(10, 10, 11, 0.25);
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
     transition: opacity 1.2s var(--ease);
 }
 
