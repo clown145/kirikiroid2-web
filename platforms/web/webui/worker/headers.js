@@ -19,7 +19,11 @@ export function withSecurityHeaders(response, extra = {}) {
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) headers.set(k, v);
     for (const [k, v] of Object.entries(extra)) headers.set(k, v);
 
-    return new Response(response.body, {
+    // 304 / 204 / 205 / 101 等状态码在 Fetch 规范中禁止携带 body，必须传 null
+    const isNullBodyStatus = [101, 204, 205, 304].includes(response.status);
+    const body = isNullBodyStatus ? null : response.body;
+
+    return new Response(body, {
         status: response.status,
         statusText: response.statusText,
         headers
