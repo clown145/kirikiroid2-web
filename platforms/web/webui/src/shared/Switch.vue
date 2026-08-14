@@ -1,6 +1,4 @@
 <script setup>
-import { computed } from 'vue';
-
 const props = defineProps({
     modelValue: {
         type: Boolean,
@@ -23,9 +21,9 @@ const props = defineProps({
 
 const emit = defineEmits(['update:modelValue', 'change']);
 
-function toggle() {
+function toggle(event) {
     if (props.disabled) return;
-    const next = !props.modelValue;
+    const next = event?.target?.checked !== undefined ? event.target.checked : !props.modelValue;
     emit('update:modelValue', next);
     emit('change', next);
 }
@@ -34,38 +32,39 @@ function handleKeydown(event) {
     if (props.disabled) return;
     if (event.key === ' ' || event.key === 'Enter') {
         event.preventDefault();
-        toggle();
+        const next = !props.modelValue;
+        emit('update:modelValue', next);
+        emit('change', next);
     }
 }
 </script>
 
 <template>
-    <button
-        type="button"
+    <label
         role="switch"
         class="krkr-switch"
         :class="[`size-${size}`, { active: modelValue, disabled }]"
         :aria-checked="modelValue"
         :aria-label="ariaLabel"
-        :disabled="disabled"
-        tabindex="0"
-        @click="toggle"
+        :tabindex="disabled ? -1 : 0"
         @keydown="handleKeydown">
         <input
             type="checkbox"
             :checked="modelValue"
             :disabled="disabled"
             tabindex="-1"
-            style="display: none;"
-            aria-hidden="true">
+            class="krkr-switch-input"
+            aria-hidden="true"
+            @change="toggle">
         <span class="krkr-switch-track">
             <span class="krkr-switch-thumb" />
         </span>
-    </button>
+    </label>
 </template>
 
 <style scoped>
 .krkr-switch {
+    position: relative;
     display: inline-flex;
     align-items: center;
     padding: 0;
@@ -76,6 +75,15 @@ function handleKeydown(event) {
     user-select: none;
     flex-shrink: 0;
     outline: none;
+}
+
+.krkr-switch-input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+    margin: 0;
+    pointer-events: none;
 }
 
 .krkr-switch:disabled,
