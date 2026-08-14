@@ -11,6 +11,7 @@ import { json, error } from './headers.js';
 import * as db from './db.js';
 import { handleAccount } from './user-auth.js';
 import { handleSaves } from './saves.js';
+import { handleHfUploadApi } from './hf-upload.js';
 
 const PUBLIC_LIST_CACHE_KEY = 'https://krkr2.internal/api/games';
 const PUBLIC_LIST_MAX_AGE = 60;
@@ -320,6 +321,10 @@ async function handleAdmin(request, env, ctx, segments) {
         const count = await db.importGames(env.DB, games);
         await invalidateListCache();
         return json({ ok: true, imported: count });
+    }
+
+    if (resource === 'hf') {
+        return handleHfUploadApi(request, env, ctx, segments.slice(1));
     }
 
     return error(404, 'Unknown admin endpoint');

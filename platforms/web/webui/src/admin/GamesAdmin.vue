@@ -4,6 +4,7 @@ import { api, coverSrc } from '../shared/api.js';
 import BackToGallery from '../shared/BackToGallery.vue';
 import { showConfirm } from '../shared/dialog.js';
 import { toast } from '../shared/toast.js';
+import HfUploadModal from './HfUploadModal.vue';
 
 const emit = defineEmits(['logout']);
 
@@ -11,6 +12,9 @@ const games = ref([]);
 const loading = ref(true);
 const status = ref('');
 const busy = ref(false);
+
+// 抱脸上传模态框
+const showHfModal = ref(false);
 
 // 编辑抽屉
 const editing = ref(false);
@@ -48,6 +52,21 @@ function openNew() {
     form.value = blankForm();
     formError.value = '';
     editing.value = true;
+}
+
+function openNewWithPreset(preset) {
+    editId.value = null;
+    form.value = {
+        title: preset?.title || '',
+        coverUrl: '',
+        downloadUrl: preset?.downloadUrl || '',
+        entryXp3: preset?.entryXp3 || '',
+        description: '',
+        tags: ''
+    };
+    formError.value = '';
+    editing.value = true;
+    toast.success('已自动填入上传信息，请核对并保存游戏');
 }
 
 function openEdit(g) {
@@ -328,7 +347,10 @@ onMounted(refresh);
                 <span class="hint">共 {{ games.length }} 个条目，拖动行可调整顺序</span>
             </div>
             <div class="toolbar-right">
-                <button class="btn btn-sm" title="选择本地游戏文件夹，自动生成并原地保存 manifest.json" @click="generateManifest">⚡ 生成游戏清单</button>
+                <button class="btn btn-primary btn-sm" title="一键上传游戏文件夹至 Hugging Face 仓库并生成加速直链" @click="showHfModal = true">
+                    🚀 上传到抱脸 (HF)
+                </button>
+                <button class="btn btn-sm" title="选择本地游戏文件夹，自动生成并原地保存 manifest.json" @click="generateManifest">⚡ 本地生成清单</button>
                 <button class="btn btn-sm" @click="importInput.click()">导入 JSON</button>
                 <button class="btn btn-sm" @click="exportJson" :disabled="!games.length">导出 JSON</button>
                 <input ref="importInput" type="file" accept=".json,application/json" hidden @change="onImport">
@@ -465,6 +487,12 @@ onMounted(refresh);
             </footer>
         </div>
     </div>
+
+    <!-- 抱脸上传模态框 -->
+    <HfUploadModal
+        :show="showHfModal"
+        @close="showHfModal = false"
+        @complete="openNewWithPreset" />
 </template>
 
 <style scoped>

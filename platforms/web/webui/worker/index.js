@@ -5,6 +5,7 @@
 
 import { handleApi } from './api.js';
 import { serveEngine } from './engine.js';
+import { handleHfProxy } from './hf-proxy.js';
 import { withSecurityHeaders, error } from './headers.js';
 
 /** 取静态资源，并把请求路径改写到指定的 HTML 入口。 */
@@ -47,6 +48,12 @@ export default {
                     );
                 }
                 const response = await handleApi(request, env, ctx, pathname);
+                return withSecurityHeaders(response);
+            }
+
+            // --- Hugging Face 资源反向代理与 1 年边缘缓存 (/hf/*) ----
+            if (pathname.startsWith('/hf/')) {
+                const response = await handleHfProxy(request, env, ctx, pathname);
                 return withSecurityHeaders(response);
             }
 
