@@ -161,6 +161,7 @@ try {
         }
     });
     await locationPage.evaluateOnNewDocument(() => {
+        try { localStorage.clear(); } catch {}
         window.showDirectoryPicker = async () => { throw new DOMException('cancelled', 'AbortError'); };
         let cache;
         window.__downloadStarts = 0;
