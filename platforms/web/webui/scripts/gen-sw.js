@@ -135,6 +135,7 @@ function isVersionPointer(url) {
 }
 
 self.addEventListener('install', function (event) {
+    self.skipWaiting();
     event.waitUntil(
         caches.open(CACHE_NAME).then(function (cache) {
             /* 逐个 add，单个失败不拖垮整批 —— addAll 是全有或全无，
