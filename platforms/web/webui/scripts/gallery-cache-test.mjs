@@ -183,7 +183,7 @@ try {
     });
     await locationPage.goto(BASE + '/', { waitUntil: 'networkidle2' });
     await locationPage.waitForSelector('.dl-btn');
-    await locationPage.click('.dl-btn');
+    await locationPage.evaluate(() => document.querySelector('.dl-btn')?.click());
     await locationPage.waitForSelector('.download-location-dialog');
     const locationPrompt = await locationPage.$eval('.download-location-dialog', (el) => ({
         text: el.textContent.replace(/\s+/g, ' ').trim(),
@@ -202,7 +202,8 @@ try {
     ok(await locationPage.evaluate(() => window.__downloadStarts === 0),
         '取消建议框不会开始下载');
 
-    await locationPage.click('.dl-btn');
+    await locationPage.evaluate(() => document.querySelector('.dl-btn')?.click());
+    await locationPage.waitForSelector('.download-location-choice input');
     await locationPage.click('.download-location-choice input');
     await locationPage.evaluate(() => {
         [...document.querySelectorAll('.download-location-actions button')]
@@ -216,7 +217,7 @@ try {
     ok(preference.starts === 1 && preference.enabled === false,
         '勾选后存浏览器里会开始下载并永久关闭建议');
 
-    await locationPage.click('.dl-btn');
+    await locationPage.evaluate(() => document.querySelector('.dl-btn')?.click());
     await new Promise((resolve) => setTimeout(resolve, 100));
     ok(await locationPage.$('.download-location-dialog') === null &&
         await locationPage.evaluate(() => window.__downloadStarts === 2),
