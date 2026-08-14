@@ -181,7 +181,7 @@ try {
             }
         });
     });
-    await locationPage.goto(BASE + '/', { waitUntil: 'networkidle2' });
+    await locationPage.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
     await locationPage.waitForSelector('.dl-btn');
     await locationPage.evaluate(() => document.querySelector('.dl-btn')?.click());
     await locationPage.waitForSelector('.download-location-dialog');
@@ -238,7 +238,7 @@ try {
     ok(await locationPage.$('.cache-prompt-reset') === null,
         '重新开启后缓存面板立即更新');
 
-    await locationPage.goto(BASE + '/game/location-test', { waitUntil: 'networkidle2' });
+    await locationPage.goto(BASE + '/game/location-test', { waitUntil: 'domcontentloaded' });
     await locationPage.waitForSelector('.detail-download');
     await locationPage.evaluate(() => document.querySelector('.detail-download')?.click());
     await locationPage.waitForSelector('.download-location-dialog');
@@ -249,7 +249,7 @@ try {
         settings.downloadFolderPrompt = false;
         localStorage.setItem('krkr2-settings', JSON.stringify(settings));
     });
-    await locationPage.goto(BASE + '/settings', { waitUntil: 'networkidle2' });
+    await locationPage.goto(BASE + '/settings', { waitUntil: 'domcontentloaded' });
     await locationPage.waitForSelector('.setting-row');
     const promptSetting = await locationPage.evaluate(() => {
         const row = [...document.querySelectorAll('.setting-row')]
