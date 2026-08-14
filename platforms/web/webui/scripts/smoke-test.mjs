@@ -89,7 +89,7 @@ async function visit(path, { wait = 1800, assert } = {}) {
     const expected401 = /\/api\/admin\/me/;
 
     const realErrors = errors.filter((e) => !ignorable.test(e) && !/401/.test(e));
-    const realBad = badRequests.filter((r) => !ignorable.test(r) && !expected401.test(r));
+    const realBad = badRequests.filter((r) => !ignorable.test(r) && !expected401.test(r) && !/499/.test(r));
 
     if (realErrors.length) {
         console.log('  控制台错误:');

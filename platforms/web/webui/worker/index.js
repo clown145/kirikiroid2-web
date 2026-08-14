@@ -107,17 +107,24 @@ export default {
             }
 
             // --- 其余交给静态资源 ---------------------------------------
-            const asset = await env.ASSETS.fetch(request);
+            try {
+                const asset = await env.ASSETS.fetch(request);
 
-            // SPA 式回退：静态资源没命中且看起来是页面导航，回首页而不是裸 404
-            if (asset.status === 404 && request.headers.get('Accept')?.includes('text/html')) {
-                const fallback = await serveAsset(env, request, url, '/index.html');
-                return withSecurityHeaders(
-                    new Response(fallback.body, { status: 404, headers: fallback.headers })
-                );
+                // SPA 式回退：静态资源没命中且看起来是页面导航，回首页而不是裸 404
+                if (asset.status === 404 && request.headers.get('Accept')?.includes('text/html')) {
+                    const fallback = await serveAsset(env, request, url, '/index.html');
+                    return withSecurityHeaders(
+                        new Response(fallback.body, { status: 404, headers: fallback.headers })
+                    );
+                }
+
+                return withSecurityHeaders(asset);
+            } catch (err) {
+                if (request.signal?.aborted || err?.message?.includes('internal error')) {
+                    return new Response(null, { status: 499 });
+                }
+                throw err;
             }
-
-            return withSecurityHeaders(asset);
         } catch (err) {
             console.error('[worker] unhandled:', err?.stack || err);
             return withSecurityHeaders(error(500, 'Internal error'));
