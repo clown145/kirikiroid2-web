@@ -250,6 +250,7 @@ try {
         localStorage.setItem('krkr2-settings', JSON.stringify(settings));
     });
     await locationPage.goto(BASE + '/settings', { waitUntil: 'networkidle2' });
+    await locationPage.waitForSelector('.setting-row');
     const promptSetting = await locationPage.evaluate(() => {
         const row = [...document.querySelectorAll('.setting-row')]
             .find((element) => element.textContent.includes('完整下载前建议选择文件夹'));
