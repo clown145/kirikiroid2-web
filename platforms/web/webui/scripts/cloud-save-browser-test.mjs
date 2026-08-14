@@ -51,6 +51,13 @@ const ok = (condition, label) => {
 
 try {
     const page = await browser.newPage();
+    const cdp = await page.createCDPSession();
+    await cdp.send('Network.enable');
+    await cdp.send('Network.setBypassServiceWorker', { bypass: true });
+    page.on('console', (msg) => {
+        if (msg.type() === 'error') console.error('Browser console error:', msg.text());
+    });
+
     await page.setCookie({
         name: '__Host-krkr2_user', value: token, url: `${BASE}/`,
         httpOnly: true, secure: true, sameSite: 'Lax'
