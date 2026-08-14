@@ -58,13 +58,18 @@ ok('全站热门作品榜返回 200', globalGamesRes.status === 200);
 ok('全站热门作品榜 type: games', globalGamesData.type === 'games');
 ok('全站热门作品榜 list 为数组', Array.isArray(globalGamesData.list));
 
-// 6. 隐私修改接口未登录拦截
+// 6. 隐私修改接口与清除数据接口未登录拦截
 const privacyRes = await fetch(`${BASE}/api/playtime/privacy`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ hidePlaytime: true })
 });
 ok('未登录修改隐私设置返回 401', privacyRes.status === 401);
+
+const clearRes = await fetch(`${BASE}/api/playtime/me`, {
+    method: 'DELETE'
+});
+ok('未登录清除游玩数据返回 401', clearRes.status === 401);
 
 let failed = 0;
 for (const [label, pass] of results) {

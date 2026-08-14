@@ -7,6 +7,7 @@
 
 import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { api } from '../shared/api.js';
+import { getSetting } from '../shared/settings.js';
 
 const REPORT_INTERVAL_SECONDS = 60;
 const MIN_FLUSH_SECONDS = 3;
@@ -37,6 +38,7 @@ export function usePlaytimeTracker(gameIdRef, phaseRef) {
     async function reportDelta(delta) {
         const id = gameIdRef.value;
         if (!id || id === 'local' || delta <= 0) return;
+        if (!getSetting('uploadPlaytime')) return;
 
         try {
             const res = await api.sendPlaytimeHeartbeat(id, delta);
@@ -53,6 +55,10 @@ export function usePlaytimeTracker(gameIdRef, phaseRef) {
         const id = gameIdRef.value;
         const delta = pendingSeconds;
         if (!id || id === 'local' || delta < MIN_FLUSH_SECONDS) return;
+        if (!getSetting('uploadPlaytime')) {
+            pendingSeconds = 0;
+            return;
+        }
 
         pendingSeconds = 0;
         try {

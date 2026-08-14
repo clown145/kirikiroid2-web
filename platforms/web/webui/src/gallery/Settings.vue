@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue';
+import { Trash2 } from '@lucide/vue';
 import { api } from '../shared/api.js';
 import AccountMenu from '../shared/AccountMenu.vue';
 import BackToGallery from '../shared/BackToGallery.vue';
@@ -149,6 +150,7 @@ async function loadSyncStatus() {
 }
 
 const updatingPrivacy = ref(false);
+const clearingPlaytime = ref(false);
 
 async function toggleHidePlaytime(checked) {
     if (updatingPrivacy.value) return;
@@ -163,6 +165,36 @@ async function toggleHidePlaytime(checked) {
         toast.error('修改隐私设置失败：' + (err.message || err));
     } finally {
         updatingPrivacy.value = false;
+    }
+}
+
+async function handleClearPlaytime() {
+    if (clearingPlaytime.value) return;
+    const ok = await showConfirm({
+        title: '清除云端游玩记录',
+        message: '确定要清除您在云端记录的全部游戏游玩时长与排行榜数据吗？此操作无法撤销。',
+        confirmText: '清除数据',
+        danger: true
+    });
+    if (!ok) return;
+
+    clearingPlaytime.value = true;
+    try {
+        await api.clearMyPlaytimes();
+        // 清理本地 localStorage 中存的时长数据
+        try {
+            const keysToRemove = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (k && k.startsWith('krkr2_playtime_')) keysToRemove.push(k);
+            }
+            for (const k of keysToRemove) localStorage.removeItem(k);
+        } catch {}
+        toast.success('已清除全部游玩时长记录');
+    } catch (err) {
+        toast.error('清除游玩记录失败：' + (err.message || err));
+    } finally {
+        clearingPlaytime.value = false;
     }
 }
 
@@ -347,13 +379,24 @@ onMounted(() => {
             <p class="sync-help"><a href="/help#sync">了解手动同步、冲突处理与数据存储方式</a></p>
         </section>
 
-        <section v-if="account" class="settings-section" aria-labelledby="playtime-privacy-settings">
+        <section class="settings-section" aria-labelledby="playtime-privacy-settings">
             <div class="section-title">
-                <h2 id="playtime-privacy-settings">游玩记录与排行榜</h2>
-                <p>控制您在社区排行榜中的展示偏好与隐私设置。</p>
+                <h2 id="playtime-privacy-settings">游玩统计与隐私</h2>
+                <p>控制时长同步、社区排行榜参与偏好与个人数据清理。</p>
             </div>
 
             <label class="setting-row">
+                <span>
+                    <strong>记录并上报游玩时长</strong>
+                    <small>开启后，游玩时长会自动同步到云端并参与社区排行榜；关闭后不会向服务器上报任何游玩数据。（默认关闭）</small>
+                </span>
+                <input
+                    type="checkbox"
+                    :checked="settings.uploadPlaytime"
+                    @change="updateSetting('uploadPlaytime', $event)">
+            </label>
+
+            <label v-if="account && settings.uploadPlaytime" class="setting-row">
                 <span>
                     <strong>在排行榜中匿名展示</strong>
                     <small>开启后，您的名字和头像将在所有公开排行榜中显示为“匿名玩家”，只有您自己能看到您的真实记录与排名。</small>
@@ -364,6 +407,17 @@ onMounted(() => {
                     :disabled="updatingPrivacy"
                     @change="toggleHidePlaytime($event.target.checked)">
             </label>
+
+            <div v-if="account" class="setting-row action-row">
+                <span>
+                    <strong>清除云端游玩记录</strong>
+                    <small>删除您在云端记录的全部作品游玩时长与排行榜数据。此操作不可撤销。</small>
+                </span>
+                <button class="btn btn-danger btn-sm" :disabled="clearingPlaytime" @click="handleClearPlaytime">
+                    <Trash2 :size="14" aria-hidden="true" />
+                    <span>{{ clearingPlaytime ? '正在清除...' : '清除我的游玩数据' }}</span>
+                </button>
+            </div>
         </section>
 
         <p v-if="status" class="settings-status" aria-live="polite">{{ status }}</p>

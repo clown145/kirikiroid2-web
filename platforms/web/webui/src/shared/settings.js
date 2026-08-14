@@ -19,7 +19,9 @@ const DEFAULTS = {
     // 存档后端：site 使用站点账号和 R2；webdav 由浏览器直连用户的服务。
     saveSyncProvider: 'site',
     // 回到游戏库时只提示存在本地改动，绝不自动上传。
-    saveSyncReminder: true
+    saveSyncReminder: true,
+    // 记录并上报游玩时长参与排行榜，默认关闭 (false)。
+    uploadPlaytime: false
 };
 
 function readAll() {

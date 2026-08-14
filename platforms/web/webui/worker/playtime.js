@@ -39,8 +39,13 @@ export async function handlePlaytime(request, env, ctx, segments) {
         return handleHeartbeat(request, env);
     }
 
-    if (action === 'me' && method === 'GET') {
-        return handleGetMyPlaytime(request, env);
+    if (action === 'me') {
+        if (method === 'GET') return handleGetMyPlaytime(request, env);
+        if (method === 'DELETE' || method === 'POST') return handleClearMyPlaytime(request, env);
+    }
+
+    if (action === 'clear' && method === 'POST') {
+        return handleClearMyPlaytime(request, env);
     }
 
     if (action === 'privacy' && (method === 'POST' || method === 'PATCH')) {
@@ -172,6 +177,18 @@ async function handleUpdatePrivacy(request, env) {
     ).bind(hidePlaytime, now, session.user.id).run();
 
     return json({ ok: true, hidePlaytime: !!hidePlaytime });
+}
+
+async function handleClearMyPlaytime(request, env) {
+    const session = await getAccountSession(request, env);
+    if (!session) return error(401, '请先登录');
+
+    const userId = session.user.id;
+    const db = env.DB;
+
+    await db.prepare('DELETE FROM user_game_playtimes WHERE user_id = ?').bind(userId).run();
+
+    return json({ ok: true, cleared: true });
 }
 
 // --- 排行榜 ----------------------------------------------------------

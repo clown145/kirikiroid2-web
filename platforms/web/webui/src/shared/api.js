@@ -53,6 +53,7 @@ export const api = {
     sendPlaytimeHeartbeat: (gameId, deltaSeconds) =>
         request('/api/playtime/heartbeat', { method: 'POST', ...body({ gameId, deltaSeconds }) }),
     getMyPlaytimes: () => request('/api/playtime/me'),
+    clearMyPlaytimes: () => request('/api/playtime/me', { method: 'DELETE' }),
     updatePlaytimePrivacy: (hidePlaytime) =>
         request('/api/playtime/privacy', { method: 'POST', ...body({ hidePlaytime }) }),
     getGameLeaderboard: (gameId) =>
