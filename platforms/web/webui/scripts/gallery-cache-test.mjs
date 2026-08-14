@@ -100,7 +100,7 @@ try {
 
         // 支持 FSA 时，首次下载应先问「存哪里」而不是直接开下
         const prompt = await page.evaluate(() => {
-            const box = document.querySelector('.modal-box');
+            const box = document.querySelector('.download-location-dialog') || document.querySelector('.modal-box');
             return {
                 supported: typeof window.showDirectoryPicker === 'function',
                 text: box ? box.textContent.replace(/\s+/g, ' ').trim() : ''
