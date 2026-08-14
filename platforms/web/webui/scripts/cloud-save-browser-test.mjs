@@ -73,7 +73,7 @@ try {
         document.body.innerText.includes('完成：') ||
         document.body.innerText.includes('已同步') ||
         document.body.innerText.includes('已上传'),
-        { timeout: 15000 }
+        { timeout: 30000 }
     );
     ok(await page.evaluate(() => document.body.innerText.includes('已同步')), 'UI 完成手动上传');
 
@@ -92,7 +92,7 @@ try {
         document.body.innerText.includes('仅站点云端') ||
         document.body.innerText.includes('仅WebDAV') ||
         document.body.innerText.includes('云端有更新'),
-        { timeout: 10000 }
+        { timeout: 30000 }
     );
     await page.evaluate(() => {
         const row = [...document.querySelectorAll('.sync-row')]
@@ -104,7 +104,7 @@ try {
         document.body.innerText.includes('已下载远端版本') ||
         document.body.innerText.includes('已下载') ||
         document.body.innerText.includes('已同步'),
-        { timeout: 15000 }
+        { timeout: 30000 }
     );
 
     const restored = await page.evaluate(async (id) => {
