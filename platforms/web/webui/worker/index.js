@@ -65,9 +65,9 @@ export default {
                 return withSecurityHeaders(asset);
             }
 
-            // --- 播放页：/play/<id> 统一由 play.html 承载 ----------------
+            // --- 播放页：/play/<id> 与 /play.html 统一由 play.html 承载 --------
             // 只改写导航请求；子资源继续走静态层，命不中就正常 404。
-            if ((pathname === '/play' || pathname.startsWith('/play/')) &&
+            if ((pathname === '/play' || pathname.startsWith('/play/') || pathname === '/play.html') &&
                 isDocumentRequest(request)) {
                 const asset = await serveAsset(env, request, url, '/play.html');
                 return withSecurityHeaders(asset);
@@ -88,10 +88,10 @@ export default {
                 return withSecurityHeaders(asset);
             }
 
-            // --- 后台：/admin[/*] ---------------------------------------
+            // --- 后台：/admin[/*] 与 /admin.html -------------------------
             // 不在此处拦截未登录请求：真正的防线是 /api/admin/* 的 session 校验。
             // admin.html 只是个登录壳，后台主体是登录成功后才动态 import 的 chunk。
-            if ((pathname === '/admin' || pathname.startsWith('/admin/')) &&
+            if ((pathname === '/admin' || pathname.startsWith('/admin/') || pathname === '/admin.html') &&
                 isDocumentRequest(request)) {
                 const asset = await serveAsset(env, request, url, '/admin.html');
                 return withSecurityHeaders(asset, { 'X-Robots-Tag': 'noindex, nofollow' });
@@ -107,7 +107,10 @@ export default {
             }
 
             // --- 其余交给静态资源 ---------------------------------------
-            const asset = await env.ASSETS.fetch(request);
+            const assetRequest = url.search
+                ? new Request(new URL(url.pathname, url.origin), request)
+                : request;
+            const asset = await env.ASSETS.fetch(assetRequest);
 
             // SPA 式回退：静态资源没命中且看起来是页面导航，回首页而不是裸 404
             if (asset.status === 404 && request.headers.get('Accept')?.includes('text/html')) {
