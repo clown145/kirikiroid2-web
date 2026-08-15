@@ -208,7 +208,12 @@ async function onPlay(event) {
     location.href = `/play/${encodeURIComponent(game.value.id)}`;
 }
 
+function handleAccountChanged(event) {
+    account.value = event.detail?.user || null;
+}
+
 onMounted(async () => {
+    window.addEventListener('krkr2:account-changed', handleAccountChanged);
     const storageCheck = refreshStorage(true).catch(() => {});
     try {
         const [loadedGame, accountResult] = await Promise.all([
@@ -233,6 +238,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
     if (pollTimer) clearInterval(pollTimer);
+    window.removeEventListener('krkr2:account-changed', handleAccountChanged);
 });
 </script>
 

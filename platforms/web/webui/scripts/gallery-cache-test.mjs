@@ -155,7 +155,15 @@ try {
                 })
             });
         } else if (url.pathname === '/api/account/me') {
-            request.respond({ status: 200, contentType: 'application/json', body: '{"user":null}' });
+            request.respond({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({
+                    user: null,
+                    localLogin: { configured: false, username: '', shouldPrompt: false },
+                    availableProviders: { steam: true, github: false }
+                })
+            });
         } else {
             request.continue();
         }

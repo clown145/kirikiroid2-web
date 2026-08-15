@@ -8,6 +8,7 @@ import Settings from './Settings.vue';
 import FolderAccessGate from '../shared/FolderAccessGate.vue';
 import ToastContainer from '../shared/ToastContainer.vue';
 import ConfirmDialog from '../shared/ConfirmDialog.vue';
+import AccountCredentialsDialog from '../shared/AccountCredentialsDialog.vue';
 
 // 游戏详情页和画廊共用这套轻量入口；播放页仍然是独立 MPA，
 // 这样进入引擎时仍会销毁整个 gallery document。
@@ -22,6 +23,7 @@ createApp({
         h(rootComponent),
         h(FolderAccessGate),
         h(ToastContainer),
-        h(ConfirmDialog)
+        h(ConfirmDialog),
+        h(AccountCredentialsDialog)
     ]
 }).mount('#app');

@@ -11,7 +11,8 @@
     "db:local": "wrangler d1 migrations apply krkr2-games --local",
     "db:remote": "wrangler d1 migrations apply krkr2-games --remote",
     "hash-password": "node scripts/hash-password.js",
-    "test": "node scripts/account-auth-test.mjs && node scripts/byte-cache-test.mjs && node scripts/downloader-test.mjs && node scripts/json-cache-test.mjs && node scripts/gallery-cache-test.mjs && node scripts/smoke-test.mjs && node scripts/offline-test.mjs && node scripts/sw-api-test.mjs && node scripts/savespace-test.mjs && node scripts/webdav-test.mjs && node scripts/cloud-save-api-test.mjs && node scripts/cloud-save-browser-test.mjs && node scripts/mobile-toolbar-test.mjs && node scripts/playtime-test.mjs && node scripts/upload-speed-test.mjs && node scripts/hf-upload-test.mjs",
+    "test": "node scripts/account-auth-test.mjs && node scripts/local-auth-api-test.mjs && node scripts/byte-cache-test.mjs && node scripts/downloader-test.mjs && node scripts/json-cache-test.mjs && node scripts/gallery-cache-test.mjs && node scripts/smoke-test.mjs && node scripts/offline-test.mjs && node scripts/sw-api-test.mjs && node scripts/savespace-test.mjs && node scripts/webdav-test.mjs && node scripts/cloud-save-api-test.mjs && node scripts/cloud-save-browser-test.mjs && node scripts/mobile-toolbar-test.mjs && node scripts/playtime-test.mjs && node scripts/upload-speed-test.mjs && node scripts/hf-upload-test.mjs",
+    "test:local-auth": "node scripts/local-auth-api-test.mjs",
     "deploy:local": "npm run build && wrangler deploy"
   },
   "dependencies": {

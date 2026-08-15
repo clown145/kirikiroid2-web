@@ -1,6 +1,8 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { KeyRound } from '@lucide/vue';
 import { accountLoginUrl } from './api.js';
+import { openAccountCredentials } from './accountCredentials.js';
 import {
     classifySync,
     deleteRemoteSave,
@@ -35,9 +37,10 @@ const historyGame = ref(null);
 const history = ref([]);
 const historyLoading = ref(false);
 const backend = ref(null);
+const currentAccount = ref(props.account);
 const returnTo = location.pathname + location.search;
 const singleGame = computed(() => props.games.length === 1 ? props.games[0] : null);
-const needsLogin = computed(() => !!backend.value?.requiresAccount && !props.account);
+const needsLogin = computed(() => !!backend.value?.requiresAccount && !currentAccount.value);
 const canSync = computed(() => !!backend.value && !needsLogin.value && !loading.value);
 const remoteName = computed(() => backend.value?.kind === 'webdav' ? 'WebDAV' : '站点云端');
 
@@ -83,7 +86,7 @@ async function refresh() {
         const local = await localSaveSummary(props.games, backend.value);
         const localMap = new Map(local.map((row) => [row.game.id, row]));
         let cloud = { saves: [], usage: null };
-        if (!backend.value.requiresAccount || props.account) {
+        if (!backend.value.requiresAccount || currentAccount.value) {
             cloud = await backend.value.list(props.games);
         }
         cloudUsage.value = cloud.usage;
@@ -252,10 +255,22 @@ async function deleteRemote(row) {
     }
 }
 
+watch(() => props.account, (value) => {
+    currentAccount.value = value;
+});
+
+async function handleAccountChanged(event) {
+    currentAccount.value = event.detail?.user || null;
+    await refresh();
+}
+
 onMounted(async () => {
+    window.addEventListener('krkr2:account-changed', handleAccountChanged);
     await refresh();
     if (props.startImmediately && canSync.value) await runAll();
 });
+
+onUnmounted(() => window.removeEventListener('krkr2:account-changed', handleAccountChanged));
 </script>
 
 <template>
@@ -276,6 +291,12 @@ onMounted(async () => {
                     <div class="sync-login-actions">
                         <a class="btn btn-primary" :href="accountLoginUrl('steam', { returnTo })">使用 Steam 登录</a>
                         <a class="btn" :href="accountLoginUrl('github', { returnTo })">使用 GitHub 登录</a>
+                    </div>
+                    <div class="sync-login-actions sync-login-secondary">
+                        <button class="btn btn-ghost" type="button" @click="openAccountCredentials('login')">
+                            <KeyRound :size="15" aria-hidden="true" />
+                            使用用户名和密码登录
+                        </button>
                         <a class="btn btn-ghost" href="/settings">改用 WebDAV</a>
                     </div>
                 </div>
@@ -290,7 +311,7 @@ onMounted(async () => {
                     <div class="sync-toolbar">
                         <div>
                             <strong>{{ backend.label }}</strong>
-                            <span v-if="backend.kind === 'site' && account">{{ account.displayName }}</span>
+                            <span v-if="backend.kind === 'site' && currentAccount">{{ currentAccount.displayName }}</span>
                             <span v-if="cloudUsage">站点云端 {{ fmtBytes(cloudUsage.bytes) }} / {{ fmtBytes(cloudUsage.limit) }}</span>
                             <span v-else-if="backend.kind === 'webdav'">存档直接传输到你的 WebDAV</span>
                         </div>
@@ -382,6 +403,7 @@ onMounted(async () => {
 .sync-login strong { font-size: 15px; }
 .sync-login p { margin: 8px 0 18px; max-width: 520px; }
 .sync-login-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.sync-login-secondary { margin-top: 8px; }
 .history-layer { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; background: rgba(0,0,0,.66); }
 .history-panel { width: min(560px, 100%); max-height: 80%; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--bg-1); box-shadow: var(--shadow-lg); }
 .history-panel > header { display: flex; justify-content: space-between; gap: 16px; padding: 16px; border-bottom: 1px solid var(--line); }

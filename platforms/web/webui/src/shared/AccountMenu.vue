@@ -1,10 +1,11 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import {
-    CircleHelp, Database, FolderOpen, Link as LinkIcon, LogOut, Menu, Settings, Shield,
+    CircleHelp, Database, FolderOpen, KeyRound, Link as LinkIcon, LogOut, Menu, Settings, Shield,
     Trash2, TriangleAlert
 } from '@lucide/vue';
 import { api, accountLoginUrl } from './api.js';
+import { notifyAccountChanged, openAccountCredentials } from './accountCredentials.js';
 
 defineProps({
     cacheTools: { type: Boolean, default: false },
@@ -39,6 +40,9 @@ const ERROR_MESSAGES = {
     provider_profile_failed: '无法读取平台账号资料。',
     identity_in_use: '这个平台账号已经绑定到另一个 Kirikiroid2 账号。',
     provider_already_linked: '当前账号已经绑定了另一个同平台账号。',
+    reauth_session_expired: '登录状态已变化，请重新登录后再试。',
+    identity_mismatch: '验证的平台账号与当前绑定账号不一致。',
+    identity_not_found: '这个平台账号尚未绑定到本站账号。',
     login_failed: '登录失败，请稍后重试。'
 };
 
@@ -49,6 +53,11 @@ function returnTo() {
 function beginAuth(provider, link = false) {
     if (!available.value[provider]) return;
     location.href = accountLoginUrl(provider, { returnTo: returnTo(), link });
+}
+
+function openLocalLogin() {
+    showMenu.value = false;
+    openAccountCredentials('login');
 }
 
 function positionMenu() {
@@ -120,6 +129,7 @@ async function logout(clearSaves = false) {
         if (clearSaves) await clearLocalSaves();
         await api.logoutAccount();
         user.value = null;
+        notifyAccountChanged(null);
         showMenu.value = false;
         showLogoutConfirm.value = false;
     } catch (err) {
@@ -160,11 +170,14 @@ onMounted(async () => {
     document.addEventListener('keydown', handleKeyDown);
     window.addEventListener('resize', positionMenu, { passive: true });
     window.addEventListener('scroll', positionMenu, { passive: true });
+    window.addEventListener('krkr2:account-changed', refreshAccount);
 });
 
 onUnmounted(() => {
     document.removeEventListener('keydown', handleKeyDown);
     window.removeEventListener('resize', positionMenu);
+    window.removeEventListener('scroll', positionMenu);
+    window.removeEventListener('krkr2:account-changed', refreshAccount);
 });
 </script>
 
@@ -239,8 +252,13 @@ onUnmounted(() => {
                         <span>GitHub</span>
                     </button>
                 </div>
-                <p v-if="status" class="account-status">{{ status }}</p>
+                <button class="account-menu-item" type="button" @click="openLocalLogin">
+                    <KeyRound :size="16" aria-hidden="true" />
+                    <span>使用用户名和密码登录</span>
+                </button>
             </div>
+
+            <p v-if="status" class="account-status">{{ status }}</p>
 
             <nav class="account-tools" aria-label="工具">
                 <a class="account-menu-item" href="/settings">

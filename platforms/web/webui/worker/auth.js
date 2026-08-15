@@ -11,6 +11,7 @@
 const ITERATIONS_DEFAULT = 100000;
 const MAX_ITERATIONS = 100000;
 const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
+const SESSION_SIGNATURE_CONTEXT = 'admin-session:v1:';
 
 // __Host- 前缀由浏览器强制：必须 Secure、Path=/、且不带 Domain。
 // 这挡掉了子域写入伪造 cookie 的路径。
@@ -114,7 +115,9 @@ async function hmacKey(secret) {
 
 async function sign(payloadB64, secret) {
     const key = await hmacKey(secret);
-    const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(payloadB64));
+    const sig = await crypto.subtle.sign(
+        'HMAC', key, encoder.encode(`${SESSION_SIGNATURE_CONTEXT}${payloadB64}`)
+    );
     return b64urlEncode(sig);
 }
 
@@ -131,7 +134,7 @@ export async function createSession(secret, ttlSeconds = SESSION_TTL_SECONDS) {
     return `${payloadB64}.${await sign(payloadB64, secret)}`;
 }
 
-/** 校验 token 签名与过期时间。任何异常都当作无效，不区分原因。 */
+/** 校验管理员 session 的签名、用途与时间字段。任何异常都当作无效。 */
 export async function verifySession(token, secret) {
     if (!token || typeof token !== 'string') return null;
     const dot = token.lastIndexOf('.');
@@ -153,8 +156,14 @@ export async function verifySession(token, secret) {
         return null;
     }
 
-    if (!payload || typeof payload.exp !== 'number') return null;
-    if (payload.exp < Math.floor(Date.now() / 1000)) return null;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+    if (payload.sub !== 'admin') return null;
+    if (!Number.isSafeInteger(payload.iat) || !Number.isSafeInteger(payload.exp)) return null;
+    if (typeof payload.jti !== 'string' || payload.jti.length === 0) return null;
+
+    const now = Math.floor(Date.now() / 1000);
+    if (payload.iat <= 0 || payload.iat > now) return null;
+    if (payload.exp <= payload.iat || payload.exp <= now) return null;
     return payload;
 }
 

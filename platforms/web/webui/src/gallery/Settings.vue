@@ -1,7 +1,8 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue';
-import { Trash2 } from '@lucide/vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { KeyRound, Trash2 } from '@lucide/vue';
 import { api } from '../shared/api.js';
+import { openAccountCredentials } from '../shared/accountCredentials.js';
 import AccountMenu from '../shared/AccountMenu.vue';
 import BackToGallery from '../shared/BackToGallery.vue';
 import SyncPanel from '../shared/SyncPanel.vue';
@@ -19,6 +20,7 @@ import { toast } from '../shared/toast.js';
 const settings = ref(getSettings());
 const deviceName = ref(getDevice().name);
 const account = ref(null);
+const localLogin = ref(null);
 const games = ref([]);
 const localRows = ref([]);
 const cloud = ref(null);
@@ -132,12 +134,24 @@ async function load() {
     try {
         const [accountResult, gameList] = await Promise.all([api.getAccount(), api.listGames()]);
         account.value = accountResult.user || null;
+        localLogin.value = accountResult.localLogin || null;
         games.value = gameList;
         await loadSyncStatus();
     } catch (err) {
         status.value = err.message || '读取设置状态失败';
     } finally {
         loading.value = false;
+    }
+}
+
+async function handleAccountChanged() {
+    try {
+        const result = await api.getAccount();
+        account.value = result.user || null;
+        localLogin.value = result.localLogin || null;
+        await loadSyncStatus();
+    } catch (err) {
+        status.value = err.message || '读取账号状态失败';
     }
 }
 
@@ -202,8 +216,11 @@ async function handleClearPlaytime() {
 
 onMounted(() => {
     document.title = '设置 · 游戏库';
+    window.addEventListener('krkr2:account-changed', handleAccountChanged);
     load();
 });
+
+onUnmounted(() => window.removeEventListener('krkr2:account-changed', handleAccountChanged));
 </script>
 
 <template>
@@ -387,6 +404,27 @@ onMounted(() => {
                 <div><dt>{{ storageUsageLabel }}</dt><dd>{{ cloud?.usage ? `${fmtBytes(cloud.usage.bytes)} / ${fmtBytes(cloud.usage.limit)}` : '由存储服务管理' }}</dd></div>
             </dl>
             <p class="sync-help"><a href="/help#sync">了解手动同步、冲突处理与数据存储方式</a></p>
+        </section>
+
+        <section v-if="account" class="settings-section" aria-labelledby="account-login-settings">
+            <div class="section-title">
+                <h2 id="account-login-settings">账号与登录</h2>
+                <p>管理可选的本站密码登录方式。</p>
+            </div>
+
+            <div class="setting-row action-row">
+                <span>
+                    <strong>{{ localLogin?.configured ? '密码登录已启用' : '密码登录未设置' }}</strong>
+                    <small v-if="localLogin?.configured">
+                        本站登录名为 {{ localLogin.username }}；可使用当前密码，或通过已绑定平台验证后修改。
+                    </small>
+                    <small v-else>设置后可直接使用本站登录名和密码，忘记密码时仍通过已绑定平台重置。</small>
+                </span>
+                <button class="btn" type="button" @click="openAccountCredentials('manage')">
+                    <KeyRound :size="15" aria-hidden="true" />
+                    {{ localLogin?.configured ? '修改密码' : '设置密码登录' }}
+                </button>
+            </div>
         </section>
 
         <section class="settings-section" aria-labelledby="playtime-privacy-settings">

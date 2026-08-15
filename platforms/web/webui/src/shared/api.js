@@ -33,6 +33,12 @@ export const api = {
     // --- 玩家账号（与管理员认证完全独立） ---
     getAccount: () => request('/api/account/me'),
     logoutAccount: () => request('/api/account/logout', { method: 'POST' }),
+    loginLocalAccount: (username, password) =>
+        request('/api/account/local/login', { method: 'POST', ...body({ username, password }) }),
+    dismissLocalLoginPrompt: () =>
+        request('/api/account/local/prompt', { method: 'POST', ...body({ dismissed: true }) }),
+    saveLocalCredentials: (credentials) =>
+        request('/api/account/local/credentials', { method: 'POST', ...body(credentials) }),
 
     // --- 认证 ---
     login: (password) => request('/api/auth/login', { method: 'POST', ...body({ password }) }),
@@ -74,9 +80,10 @@ export const api = {
 };
 
 /** 返回同源登录/绑定入口。OAuth 完成后回到当前 Document 的原路径。 */
-export function accountLoginUrl(provider, { returnTo = '/', link = false } = {}) {
+export function accountLoginUrl(provider, { returnTo = '/', link = false, purpose = '' } = {}) {
     const params = new URLSearchParams({ returnTo });
     if (link) params.set('link', '1');
+    if (purpose) params.set('purpose', purpose);
     return `/api/account/login/${encodeURIComponent(provider)}?${params}`;
 }
 

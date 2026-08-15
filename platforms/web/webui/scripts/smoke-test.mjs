@@ -44,12 +44,13 @@ const browser = await puppeteer.launch({
 
 let failures = 0;
 
-async function visit(path, { wait = 1800, assert } = {}) {
+async function visit(path, { wait = 1800, prepare, assert } = {}) {
     const page = await browser.newPage();
     // SW 会拿上一次构建的 chunk / 缓存的 API 响应顶掉新内容，绕开它
     const cdp = await page.createCDPSession();
     await cdp.send('Network.enable');
     await cdp.send('Network.setBypassServiceWorker', { bypass: true });
+    if (prepare) await prepare(page);
     const errors = [];
     const badRequests = [];
 
@@ -115,10 +116,48 @@ await visit('/', {
             menu: document.querySelector('.account-menu')?.textContent || '',
             providers: [...document.querySelectorAll('.provider-button')]
                 .map((button) => button.textContent.trim()),
+            localLoginBelowProviders: (() => {
+                const providerList = document.querySelector('.account-guest .provider-list');
+                const localLogin = document.querySelector('.account-guest > .account-menu-item');
+                return !!providerList && providerList.nextElementSibling === localLogin &&
+                    localLogin.textContent.includes('使用用户名和密码登录');
+            })(),
             tools: [...document.querySelectorAll('.account-menu-item')]
                 .map((item) => item.textContent.trim()),
             viewportFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth
         }));
+        await page.click('.account-guest > .account-menu-item');
+        await page.waitForSelector('.credentials-dialog', { visible: true });
+        await page.waitForSelector(
+            '.credentials-dialog input[autocomplete="username"]',
+            { visible: true }
+        );
+        const credentials = await page.$eval('.credentials-dialog', (dialog) => ({
+            title: dialog.querySelector('#credentials-title')?.textContent.trim() || '',
+            hasUsername: !!dialog.querySelector('input[autocomplete="username"]'),
+            hasPassword: !!dialog.querySelector('input[autocomplete="current-password"]')
+        }));
+        async function closeCredentials(action) {
+            await action();
+            await page.waitForFunction(() => !document.querySelector('.credentials-dialog'));
+            return page.evaluate(() => document.activeElement?.matches('.account-trigger') === true);
+        }
+        async function reopenCredentials() {
+            await page.evaluate(() => document.querySelector('.account-trigger')?.click());
+            await page.waitForSelector('.account-menu', { visible: true });
+            await page.click('.account-guest > .account-menu-item');
+            await page.waitForSelector('.credentials-dialog', { visible: true });
+            await page.waitForSelector(
+                '.credentials-dialog input[autocomplete="username"]',
+                { visible: true }
+            );
+        }
+        const escapeRestoresFocus = await closeCredentials(() => page.keyboard.press('Escape'));
+        await reopenCredentials();
+        const closeButtonRestoresFocus = await closeCredentials(() => page.click('.credentials-close'));
+        await reopenCredentials();
+        const cancelRestoresFocus = await closeCredentials(() =>
+            page.click('.credentials-actions .btn-ghost'));
         return {
             '渲染出游戏卡片': (await page.$$('.card')).length > 0,
             '标题为“游戏库”': (await page.$eval('h1', (e) => e.textContent).catch(() => '')) === '游戏库',
@@ -131,6 +170,13 @@ await visit('/', {
             '未登录菜单同时提供 Steam 与 GitHub':
                 account.providers.some((v) => v.includes('Steam')) &&
                 account.providers.some((v) => v.includes('GitHub')),
+            'Steam 与 GitHub 保持为主登录按钮': account.providers.length === 2,
+            '密码登录入口位于两个平台登录下方': account.localLoginBelowProviders,
+            '账号菜单密码入口打开共享登录弹窗':
+                credentials.title === '使用密码登录' &&
+                credentials.hasUsername && credentials.hasPassword,
+            '密码登录弹窗关闭后焦点回到账号菜单按钮':
+                escapeRestoresFocus && closeButtonRestoresFocus && cancelRestoresFocus,
             '未登录菜单明确本地游玩和 WebDAV 无需登录':
                 account.menu.includes('本地游玩和 WebDAV 无需登录'),
             '工具入口已收纳进菜单': ['设置与存档同步', '帮助与说明', '本地缓存', '打开本地文件', '管理后台']
@@ -146,6 +192,59 @@ await visit('/', {
                 const wasm = links.filter((h) => h && h.endsWith('index.wasm'));
                 return wasm.length > 0 && wasm.every((h) => h === base + 'index.wasm');
             })
+        };
+    }
+});
+
+// --- 首访 OAuth：快速初始化完成后再询问是否设置密码登录 ---
+await visit('/?localGrant=1&localGrantPurpose=setup&authSuccess=1', {
+    wait: 0,
+    prepare: async (page) => {
+        await page.setRequestInterception(true);
+        page.on('request', (request) => {
+            if (new URL(request.url()).pathname === '/api/account/me') {
+                request.respond({
+                    status: 200,
+                    contentType: 'application/json',
+                    body: JSON.stringify({
+                        user: {
+                            id: 'oauth-first-visit',
+                            displayName: '首次登录用户',
+                            avatarUrl: '',
+                            providers: ['steam']
+                        },
+                        localLogin: { configured: false, username: '', shouldPrompt: true },
+                        availableProviders: { steam: true, github: false }
+                    })
+                });
+                return;
+            }
+            request.continue();
+        });
+    },
+    assert: async (page) => {
+        await page.waitForSelector('[data-account-credentials-blocker]', { visible: true });
+        const whileOnboarding = await page.evaluate(() => ({
+            grantMarkerCleared: !new URL(location.href).searchParams.has('localGrant') &&
+                !new URL(location.href).searchParams.has('localGrantPurpose'),
+            onboardingCount: document.querySelectorAll('.onboarding-dialog').length,
+            credentialsCount: document.querySelectorAll('.credentials-dialog').length
+        }));
+
+        await page.click('.onboarding-actions .btn-ghost');
+        await page.waitForFunction(() =>
+            document.querySelector('#credentials-title')?.textContent.trim() === '设置备用登录方式');
+        const afterOnboarding = await page.evaluate(() => ({
+            onboardingCount: document.querySelectorAll('.onboarding-dialog').length,
+            credentialsCount: document.querySelectorAll('.credentials-dialog').length
+        }));
+
+        return {
+            'OAuth grant URL 标记在等待期间已清理': whileOnboarding.grantMarkerCleared,
+            '快速初始化显示时不叠加密码设置询问':
+                whileOnboarding.onboardingCount === 1 && whileOnboarding.credentialsCount === 0,
+            '快速初始化关闭后只显示一次密码设置询问':
+                afterOnboarding.onboardingCount === 0 && afterOnboarding.credentialsCount === 1
         };
     }
 });
@@ -172,16 +271,41 @@ await visit('/help', {
 await visit(`/game/${encodeURIComponent(fixtureId)}`, {
     assert: async (page) => {
         await page.click('.detail-sync');
-        const panel = await page.evaluate(() => document.querySelector('.sync-panel')?.innerText || '');
+        const panel = await page.evaluate(() => {
+            const root = document.querySelector('.sync-panel');
+            const actionGroups = [...(root?.querySelectorAll('.sync-login > .sync-login-actions') || [])];
+            return {
+                text: root?.innerText || '',
+                primaryActions: [...(actionGroups[0]?.querySelectorAll('a') || [])]
+                    .map((item) => item.textContent.trim()),
+                secondaryLogin: actionGroups[1]?.querySelector('button')?.textContent.trim() || ''
+            };
+        });
+        await page.click('.sync-login-secondary button');
+        await page.waitForSelector('.credentials-dialog', { visible: true });
+        await page.waitForSelector(
+            '.credentials-dialog input[autocomplete="username"]',
+            { visible: true }
+        );
+        const credentialsTitle = await page.$eval(
+            '.credentials-dialog #credentials-title',
+            (title) => title.textContent.trim()
+        );
         return {
             '详情页保留明确的开始游戏入口': !!(await page.$('.detail-play')),
             '详情页返回游戏库固定在左侧': !!(await page.$('.detail-nav > .back-to-gallery')),
             '详情页右侧不再重复返回入口': !(await page.$('.detail-nav-actions > .back-to-gallery')),
             '详情页提供单游戏同步入口': !!(await page.$('.detail-sync')),
-            '单游戏同步面板显示当前作品': panel.includes('冒烟测试用条目 · 存档同步'),
-            '单游戏同步面板未显示同步全部': !panel.includes('同步全部存档'),
+            '单游戏同步面板显示当前作品': panel.text.includes('冒烟测试用条目 · 存档同步'),
+            '单游戏同步面板未显示同步全部': !panel.text.includes('同步全部存档'),
             '未登录也能打开同步面板并看到登录入口':
-                panel.includes('登录后才能同步') && panel.includes('Steam') && panel.includes('GitHub')
+                panel.text.includes('登录后才能同步') &&
+                panel.primaryActions.some((value) => value.includes('Steam')) &&
+                panel.primaryActions.some((value) => value.includes('GitHub')),
+            '同步面板将密码登录保留为次级入口':
+                panel.primaryActions.length === 2 &&
+                panel.secondaryLogin.includes('使用用户名和密码登录'),
+            '同步面板密码入口打开共享登录弹窗': credentialsTitle === '使用密码登录'
         };
     }
 });

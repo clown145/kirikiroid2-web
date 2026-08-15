@@ -62,7 +62,10 @@ onMounted(() => {
 
 <template>
     <Teleport to="body">
-        <div class="onboarding-backdrop" @click.self="dismiss">
+        <div
+            class="onboarding-backdrop"
+            data-account-credentials-blocker
+            @click.self="dismiss">
             <section
                 class="onboarding-dialog"
                 role="dialog"

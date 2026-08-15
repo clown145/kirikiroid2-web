@@ -391,7 +391,12 @@ function onOnboardingClose() {
     showOnboarding.value = false;
 }
 
+function handleAccountChanged(event) {
+    account.value = event.detail?.user || null;
+}
+
 onMounted(async () => {
+    window.addEventListener('krkr2:account-changed', handleAccountChanged);
     try {
         showOnboarding.value = localStorage.getItem(ONBOARDING_DISMISSED_KEY) !== '1';
     } catch {
@@ -421,6 +426,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
     if (dlPoll) clearInterval(dlPoll);
+    window.removeEventListener('krkr2:account-changed', handleAccountChanged);
 });
 </script>
 
