@@ -435,6 +435,7 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
                                 class="input"
                                 type="password"
                                 autocomplete="current-password"
+                                maxlength="128"
                                 required>
                         </label>
                         <label class="field">
@@ -445,7 +446,6 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
                                 class="input"
                                 type="password"
                                 autocomplete="new-password"
-                                minlength="10"
                                 maxlength="128"
                                 required>
                         </label>
@@ -456,7 +456,6 @@ onUnmounted(() => document.removeEventListener('keydown', onKeydown));
                                 class="input"
                                 type="password"
                                 autocomplete="new-password"
-                                minlength="10"
                                 maxlength="128"
                                 required>
                         </label>

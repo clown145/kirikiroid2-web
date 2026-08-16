@@ -17,7 +17,6 @@ const LOCAL_LOGIN_ACCOUNT_MAX_ATTEMPTS = 5;
 const LOCAL_LOGIN_IP_MAX_ATTEMPTS = 20;
 const USERNAME_MIN_LENGTH = 3;
 const USERNAME_MAX_LENGTH = 32;
-const PASSWORD_MIN_LENGTH = 10;
 const PASSWORD_MAX_LENGTH = 128;
 const STEAM_OPENID_ENDPOINT = 'https://steamcommunity.com/openid/login';
 const OPENID2_NAMESPACE = 'http://specs.openid.net/auth/2.0';
@@ -251,7 +250,7 @@ function normalizeUsername(value) {
 
 function validPassword(value) {
     return typeof value === 'string' &&
-        value.length >= PASSWORD_MIN_LENGTH && value.length <= PASSWORD_MAX_LENGTH;
+        value.length > 0 && value.length <= PASSWORD_MAX_LENGTH;
 }
 
 async function getLocalCredential(db, userId) {
@@ -1008,7 +1007,7 @@ async function handleLocalCredentials(request, env) {
     if (!validPassword(body.password)) {
         return accountError(
             400, 'invalid_password',
-            `密码长度必须为 ${PASSWORD_MIN_LENGTH}-${PASSWORD_MAX_LENGTH} 个字符`
+            `密码不能为空，且不能超过 ${PASSWORD_MAX_LENGTH} 个字符`
         );
     }
 

@@ -51,9 +51,10 @@ const sessionC = `session-c-${suffix}`;
 const setupGrantA = `setup-a-${suffix}`;
 const setupGrantB = `setup-b-${suffix}`;
 const resetGrantC = `reset-c-${suffix}`;
-const setupPassword = 'setup-password-123';
+const setupPassword = 'x';
 const changedPassword = 'changed-password-456';
 const resetPassword = 'reset-password-789';
+const tooLongPassword = 'x'.repeat(129);
 const usernameSuffix = suffix.slice(0, 12);
 const localUsername = `User.${usernameSuffix}`;
 const normalizedUsername = localUsername.toLowerCase();
@@ -271,6 +272,15 @@ try {
         resetWithoutCredential.data.code === 'credential_not_configured',
     'reset grant 不能替代首次设置流程');
 
+    const tooLongSetup = await post(
+        '/api/account/local/credentials',
+        { username: localUsername, password: tooLongPassword, grant: true },
+        authCookies(sessionA, setupGrantA)
+    );
+    ok(tooLongSetup.response.status === 400 &&
+        tooLongSetup.data.code === 'invalid_password',
+    '本站密码取消最小位数限制但仍拒绝超过 128 位');
+
     const setup = await post(
         '/api/account/local/credentials',
         { username: localUsername, password: setupPassword, grant: true },
@@ -278,7 +288,7 @@ try {
     );
     const setupSessionCookie = responseCookie(setup.response, '__Host-krkr2_user');
     ok(setup.response.ok && setup.data.localLogin?.username === localUsername && !!setupSessionCookie,
-        '绑定原 OAuth session 的 setup grant 可首次设置凭据');
+        '绑定原 OAuth session 的 setup grant 可设置 1 位密码');
     ok((await me(authCookies(sessionA))).user === null,
         '首次设置凭据后旧 OAuth session 失效');
 
@@ -287,7 +297,7 @@ try {
     )[0];
     ok(stored?.username_normalized === normalizedUsername &&
         stored.password_hash?.startsWith('pbkdf2$') &&
-        !stored.password_hash.includes(setupPassword),
+        stored.password_hash !== setupPassword,
     '登录名规范化且 D1 只保存 PBKDF2 哈希');
 
     const normalizedLogin = await post(
